@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: 单元测试（Windows / Node ${{ matrix.node }}）
+    name: Unit tests (Windows / Node ${{ matrix.node }})
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -24,16 +24,16 @@ jobs:
           cache: npm
 
       # 单元测试不需要 Electron 二进制，跳过 188MB 下载以加快 CI
-      - name: 安装依赖
+      - name: Install dependencies
         run: npm ci
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
 
-      - name: 运行测试
+      - name: Run tests
         run: npm test
 
       # 直接驱动 agent.ps1 内嵌 C# 的钩子回调，防止键位映射被改坏
-      - name: 鼠标钩子逻辑冒烟测试
+      - name: Mouse hook logic smoke test
         shell: powershell
         run: |
           Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force

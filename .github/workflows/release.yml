@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: 构建便携版并发布
+    name: Build portable edition and publish
     runs-on: windows-latest
 
     steps:
@@ -21,22 +21,22 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: 安装依赖（含 Electron 运行时）
+      - name: Install dependencies (including the Electron runtime)
         run: npm ci
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
 
-      - name: 测试
+      - name: Run tests
         run: npm test
 
-      - name: 打包便携版
+      - name: Pack the portable edition
         run: npm run pack
 
       # 用 7-Zip 而不是 Compress-Archive：同一个目录，.NET deflate 压出来 105MB，
       # 7-Zip -mx=9 只要 99.6MB —— 差这 5MB 就决定 Gitee 上放的是「一个能直接解压的
       # zip」还是「两个必须手工拼接的 part」。build/zip.js 还带体积闸门：超过
       # 100MiB 直接让 job 失败，避免以后又悄悄退回分片包。
-      - name: 压缩产物（7-Zip，体积闸门 100MiB）
+      - name: Compress the artifact (7-Zip, 100MiB size gate)
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
@@ -46,7 +46,7 @@ jobs:
           Get-Item "ApkStart-$tag-win64-portable.zip" | Select-Object Name, Length
 
       # 创建 Release 并上传轻量便携版（壳层极小，运行时首次启动按需下载）
-      - name: 创建 Release
+      - name: Create the Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
@@ -72,7 +72,7 @@ jobs:
             gh release upload $tag $zip --clobber
             if ($LASTEXITCODE -eq 0) { $ok = $true } else { Start-Sleep -Seconds 15 }
           }
-          if (-not $ok) { Write-Error "上传失败: $zip"; exit 1 }
+          if (-not $ok) { Write-Error "Upload failed: $zip"; exit 1 }
           gh release view $tag --json assets --jq '.assets[].name'
 
       # 同步到 Gitee：国内直连 GitHub 只有几十 KB/s，Gitee 通常能跑几 MB/s。
@@ -83,7 +83,7 @@ jobs:
       # Gitee 同步「缺 token / 网络不通」只告警不阻断：否则整 build job 变红，
       # 下面 needs: build 的 full job 会被整段跳过，连 GitHub 自己的 Setup / 运行时整包都发不出。
       # 缺 token 时这一步仍会在日志里标红（continue-on-error 是「可见但非致命」），不静默。
-      - name: 同步便携版到 Gitee
+      - name: Sync the portable edition to Gitee
         continue-on-error: true
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
@@ -93,7 +93,7 @@ jobs:
           # v0.3.4 就这样在 Gitee 上悄悄少了一个版本，事后才发现。
           # 现在缺 token 直接让这一步失败，宁可红一次也别再无声无息。
           if (-not $env:GITEE_TOKEN) {
-            Write-Error "缺少 GITEE_TOKEN：Gitee 这一版不会有安装包。请在 Settings → Secrets and variables → Actions 添加 GITEE_TOKEN（勾选 projects + pull_requests 之外的 releases 权限即可）。"
+            Write-Error "GITEE_TOKEN is missing: no installer will be published to Gitee for this release. Add GITEE_TOKEN under Settings → Secrets and variables → Actions (a token with releases permission is enough)."
             exit 1
           }
           $tag = "${{ github.ref_name }}"
@@ -108,7 +108,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   full:
-    name: 构建完整版（内置运行时，离线开箱即用）
+    name: Build the full edition (bundled runtime, offline out of the box)
     runs-on: windows-latest
     needs: build
     steps:
@@ -119,21 +119,21 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: 安装依赖
+      - name: Install dependencies
         run: npm ci
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
 
       # 从 Google 官方源组装运行时（emulator + platform-tools + aehd + Play x86_64 镜像）。
       # 输出到 engine/，与本地开发时的目录结构一致。
-      - name: 组装运行时
+      - name: Assemble the runtime
         run: node build/fetch-runtime.js engine
 
       # prepare-runtime 会把 system.img/vendor.img 压成 xz(LZMA2)。
       # CI runner 只有 2 核：XZ_PRESET=6 把压缩时间从 ~2h 降到 ~40min（体积 +3%）。
       # XZ_TIMEOUT_MS 是看门狗：超时自动 kill 并落 gzip 兜底，
       # 绝不重演「stdin 没接 EOF → 0 字节输出 → 挂死 3 小时」。
-      - name: 准备运行时（xz 压缩，CI 降档加速）
+      - name: Prepare the runtime (xz compression, reduced preset in CI)
         run: node build/prepare-runtime.js --force
         env:
           XZ_PRESET: '6'
@@ -142,26 +142,26 @@ jobs:
       # 内置微软 VC++ 2015-2022 x64 运行库：安卓模拟器（Qt6）与 qemu 都依赖它，
       # 缺了在「其他电脑」上会直接起不来（0xc0000135 / MSVCP140 缺失）。
       # 放到 build/runtime 内，随 extraResources 一起打进安装包；离线也能一键安装。
-      - name: 下载 VC++ 运行库（离线内置）
+      - name: Download the VC++ runtime (bundled offline)
         shell: pwsh
         run: |
           $dir = "build\runtime"
           if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
           $out = "$dir\vc_redist.x64.exe"
-          Write-Output "下载 VC++ 2015-2022 x64 运行库…"
+          Write-Output "Downloading the VC++ 2015-2022 x64 runtime…"
           curl.exe -L -o $out "https://aka.ms/vs/17/release/vc_redist.x64.exe"
-          if (-not (Test-Path $out) -or (Get-Item $out).Length -lt 1MB) { Write-Error "vc_redist 下载失败" }
+          if (-not (Test-Path $out) -or (Get-Item $out).Length -lt 1MB) { Write-Error "vc_redist download failed" }
           Get-Item $out | Select-Object Name, Length
 
       # 不打 git tag 时 electron-builder 不会隐式发布；打了 tag 也会因为本 job 没有
       # GH_TOKEN 而报 "GitHub Personal Access Token is not set" 后退出 1（之前完整版一直失败的根因）。
       # 这里显式 --publish never，安装包由后面「上传完整版到 Release」步骤用 gh release upload 上传。
-      - name: 构建完整版安装包
+      - name: Build the full-edition installer
         run: npx electron-builder --win nsis --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
-      - name: 上传完整版到 Release
+      - name: Upload the full edition to the Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
@@ -169,32 +169,32 @@ jobs:
           $tag = "${{ github.ref_name }}"
           if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
           $setup = Get-ChildItem dist/release/*Setup.exe | Select-Object -First 1
-          if (-not $setup) { Write-Error "未找到 Setup.exe"; exit 1 }
-          Write-Output ("上传 {0} ({1:N0} MB)" -f $setup.Name, ($setup.Length / 1MB))
+          if (-not $setup) { Write-Error "Setup.exe not found"; exit 1 }
+          Write-Output ("Uploading {0} ({1:N0} MB)" -f $setup.Name, ($setup.Length / 1MB))
           $ok = $false
           for ($i = 1; $i -le 3 -and -not $ok; $i++) {
             gh release upload $tag $setup.FullName --clobber
             if ($LASTEXITCODE -eq 0) { $ok = $true } else { Start-Sleep -Seconds 20 }
           }
-          if (-not $ok) { Write-Error "上传失败: $($setup.Name)"; exit 1 }
+          if (-not $ok) { Write-Error "Upload failed: $($setup.Name)"; exit 1 }
           gh release view $tag --json assets --jq '.assets[] | "\(.name) \(.size)"'
 
       # 轻量版（不带运行时）不再去 dl.google.com 逐个下 emulator / 系统镜像，
       # 而是直接下这一个整包 —— 下载源与「软件更新」同为本项目 GitHub Release，
       # 国内网络稳定性、出问题后的排障都只在一个地方。
       # 内容已经是 .xz 压缩过的镜像，这里用 bsdtar 直接打 zip（不再二次压缩，省几十分钟）。
-      - name: 打包运行时整包（轻量版下载源）
+      - name: Package the full runtime bundle (download source for the slim edition)
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
           $zip = "ApkStart-runtime-$tag.zip"
-          if (-not (Test-Path "build\runtime\emulator\emulator.exe")) { Write-Error "build\runtime 不完整"; exit 1 }
+          if (-not (Test-Path "build\runtime\emulator\emulator.exe")) { Write-Error "build\runtime is incomplete"; exit 1 }
           tar.exe -a -cf $zip -C "build\runtime" .
-          if ($LASTEXITCODE -ne 0) { Write-Error "打包运行时失败"; exit 1 }
+          if ($LASTEXITCODE -ne 0) { Write-Error "Failed to package the runtime"; exit 1 }
           Get-Item $zip | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
 
-      - name: 上传运行时整包到 Release
+      - name: Upload the runtime bundle to the Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
@@ -207,5 +207,5 @@ jobs:
             gh release upload $tag $zip --clobber
             if ($LASTEXITCODE -eq 0) { $ok = $true } else { Start-Sleep -Seconds 20 }
           }
-          if (-not $ok) { Write-Error "上传失败: $zip"; exit 1 }
+          if (-not $ok) { Write-Error "Upload failed: $zip"; exit 1 }
           gh release view $tag --json assets --jq '.assets[] | "\(.name) \(.size)"'
