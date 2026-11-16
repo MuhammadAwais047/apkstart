@@ -32,10 +32,10 @@ jobs:
       - name: Pack the portable edition
         run: npm run pack
 
-      # 用 7-Zip 而不是 Compress-Archive：同一个目录，.NET deflate 压出来 105MB，
-      # 7-Zip -mx=9 只要 99.6MB —— 差这 5MB 就决定 Gitee 上放的是「一个能直接解压的
-      # zip」还是「两个必须手工拼接的 part」。build/zip.js 还带体积闸门：超过
-      # 100MiB 直接让 job 失败，避免以后又悄悄退回分片包。
+      # Use 7-Zip instead of Compress-Archive: same directory, .NET deflate makes 105MB,
+      # 7-Zip -mx=9 makes 99.6MB - those 5MB decide whether Gitee gets "one directly extractable
+      # zip" or "two parts that must be joined by hand". build/zip.js also has a size gate: over
+      # 100MiB fails the job outright, so we do not quietly regress to part packages later.
       - name: Compress the artifact (7-Zip, 100MiB size gate)
         shell: pwsh
         run: |
@@ -45,7 +45,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-Item "ApkStart-$tag-win64-portable.zip" | Select-Object Name, Length
 
-      # 创建 Release 并上传轻量便携版（壳层极小，运行时首次启动按需下载）
+      # Create the Release and upload the light portable build (tiny shell; runtime downloads on first start)
       - name: Create the Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -54,10 +54,10 @@ jobs:
           $tag = "${{ github.ref_name }}"
           if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
           $zip = "ApkStart-$tag-win64-portable.zip"
-          # 幂等：release 已存在（如重跑 / 重推 tag）就跳过 create，只上传资产
+          # Idempotent: if the release exists (re-run / re-pushed tag) skip create and only upload assets
           $existing = gh release view $tag --json tagName -q .tagName 2>$null
-          # 有手写的发版说明就用它（.github/release-notes-<tag>.md），比 --generate-notes
-          # 的「Full Changelog」有用得多；没有才退回自动生成。
+          # Use a hand-written note when present (.github/release-notes-<tag>.md); it beats
+          # the generated "Full Changelog"; fall back to auto-generation only when absent.
           $notes = ".github/release-notes-$tag.md"
           if (-not $existing) {
             if (Test-Path $notes) {
@@ -75,30 +75,30 @@ jobs:
           if (-not $ok) { Write-Error "Upload failed: $zip"; exit 1 }
           gh release view $tag --json assets --jq '.assets[].name'
 
-      # 同步到 Gitee：国内直连 GitHub 只有几十 KB/s，Gitee 通常能跑几 MB/s。
-      # 便携包压紧后约 99.6MB，在 Gitee 单文件上限（100MB）以内，直接放一个整包，
-      # 用户点开就能解压；只有超限时 publish-gitee.js 才退回 .part1/.part2 分片。
-      # Setup（1.4GB）与运行时整包（1.4GB）超限太多，只留在 GitHub ——
-      # 应用端对「哪个源有资产」是取并集的，不影响更新。
-      # Gitee 同步「缺 token / 网络不通」只告警不阻断：否则整 build job 变红，
-      # 下面 needs: build 的 full job 会被整段跳过，连 GitHub 自己的 Setup / 运行时整包都发不出。
-      # 缺 token 时这一步仍会在日志里标红（continue-on-error 是「可见但非致命」），不静默。
+      # Sync to Gitee: direct GitHub from mainland China runs at tens of KB/s, Gitee usually several MB/s.
+      # The packed portable is ~99.6MB, within the Gitee 100MB per-file cap, so one whole package
+      # is uploaded and users can extract it directly; only over-cap packages fall back to .part1/.part2 in publish-gitee.js.
+      # Setup (1.4GB) and the runtime bundle (1.4GB) are far over the cap and stay on GitHub -
+      # the app unions "which source has assets", so updates are unaffected.
+      # Gitee sync warns but does not block on missing token / network: otherwise the build job goes red
+      # and the full job behind needs: build is skipped entirely, so even GitHub Setup / runtime never ship.
+      # A missing token still shows red in the log (continue-on-error is "visible but non-fatal"), never silent.
       - name: Sync the portable edition to Gitee
         continue-on-error: true
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         shell: pwsh
         run: |
-          # 以前这里是「没配 token 就静默跳过、这一步仍显示成功」——
-          # v0.3.4 就这样在 Gitee 上悄悄少了一个版本，事后才发现。
-          # 现在缺 token 直接让这一步失败，宁可红一次也别再无声无息。
+          # Previously this step "silently skipped without a token and still showed success" -
+          # that is how v0.3.4 quietly lost a Gitee release until someone noticed.
+          # Now a missing token fails the step; red once beats silent again.
           if (-not $env:GITEE_TOKEN) {
             Write-Error "GITEE_TOKEN is missing: no installer will be published to Gitee for this release. Add GITEE_TOKEN under Settings → Secrets and variables → Actions (a token with releases permission is enough)."
             exit 1
           }
           $tag = "${{ github.ref_name }}"
           if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
-          # 发布说明与 GitHub 用同一份，别让 Gitee 那边只剩一句「便携版安装包」
+          # Same notes as GitHub; do not leave Gitee with only "portable package"
           $notes = ".github/release-notes-$tag.md"
           if (Test-Path $notes) {
             node tools/publish-gitee.js $tag --zip "ApkStart-$tag-win64-portable.zip" --notes $notes
@@ -124,24 +124,24 @@ jobs:
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
 
-      # 从 Google 官方源组装运行时（emulator + platform-tools + aehd + Play x86_64 镜像）。
-      # 输出到 engine/，与本地开发时的目录结构一致。
+      # Assemble the runtime from official Google sources (emulator + platform-tools + aehd + Play x86_64 image).
+      # Output goes to engine/, matching the local dev layout.
       - name: Assemble the runtime
         run: node build/fetch-runtime.js engine
 
-      # prepare-runtime 会把 system.img/vendor.img 压成 xz(LZMA2)。
-      # CI runner 只有 2 核：XZ_PRESET=6 把压缩时间从 ~2h 降到 ~40min（体积 +3%）。
-      # XZ_TIMEOUT_MS 是看门狗：超时自动 kill 并落 gzip 兜底，
-      # 绝不重演「stdin 没接 EOF → 0 字节输出 → 挂死 3 小时」。
+      # prepare-runtime compresses system.img/vendor.img to xz (LZMA2).
+      # CI runners have 2 cores: XZ_PRESET=6 cuts compression from ~2h to ~40min (+3% size).
+      # XZ_TIMEOUT_MS is a watchdog: on timeout kill and fall back to gzip,
+      # never replaying "stdin no EOF -> 0-byte output -> 3-hour hang".
       - name: Prepare the runtime (xz compression, reduced preset in CI)
         run: node build/prepare-runtime.js --force
         env:
           XZ_PRESET: '6'
           XZ_TIMEOUT_MS: '3600000'
 
-      # 内置微软 VC++ 2015-2022 x64 运行库：安卓模拟器（Qt6）与 qemu 都依赖它，
-      # 缺了在「其他电脑」上会直接起不来（0xc0000135 / MSVCP140 缺失）。
-      # 放到 build/runtime 内，随 extraResources 一起打进安装包；离线也能一键安装。
+      # Bundle the Microsoft VC++ 2015-2022 x64 runtime: the Android emulator (Qt6) and qemu need it;
+      # without it the app fails to start on "other PCs" (0xc0000135 / missing MSVCP140).
+      # Placed in build/runtime, shipped with extraResources; one-click install works offline too.
       - name: Download the VC++ runtime (bundled offline)
         shell: pwsh
         run: |
@@ -153,9 +153,9 @@ jobs:
           if (-not (Test-Path $out) -or (Get-Item $out).Length -lt 1MB) { Write-Error "vc_redist download failed" }
           Get-Item $out | Select-Object Name, Length
 
-      # 不打 git tag 时 electron-builder 不会隐式发布；打了 tag 也会因为本 job 没有
-      # GH_TOKEN 而报 "GitHub Personal Access Token is not set" 后退出 1（之前完整版一直失败的根因）。
-      # 这里显式 --publish never，安装包由后面「上传完整版到 Release」步骤用 gh release upload 上传。
+      # Without a git tag electron-builder does not publish implicitly; with a tag it also fails with
+      # "GitHub Personal Access Token is not set" and exits 1 because this job has no GH_TOKEN (the old root cause).
+      # So pass --publish never explicitly; the later "upload full build to Release" step uses gh release upload.
       - name: Build the full-edition installer
         run: npx electron-builder --win nsis --publish never
         env:
@@ -179,10 +179,10 @@ jobs:
           if (-not $ok) { Write-Error "Upload failed: $($setup.Name)"; exit 1 }
           gh release view $tag --json assets --jq '.assets[] | "\(.name) \(.size)"'
 
-      # 轻量版（不带运行时）不再去 dl.google.com 逐个下 emulator / 系统镜像，
-      # 而是直接下这一个整包 —— 下载源与「软件更新」同为本项目 GitHub Release，
-      # 国内网络稳定性、出问题后的排障都只在一个地方。
-      # 内容已经是 .xz 压缩过的镜像，这里用 bsdtar 直接打 zip（不再二次压缩，省几十分钟）。
+      # The light build (no runtime) no longer downloads emulator / system images one by one from dl.google.com,
+      # it fetches this single bundle - the same GitHub Release used by in-app updates,
+      # so mainland stability and troubleshooting live in one place.
+      # The content is already xz-compressed images; bsdtar zips directly (no second compression, saves tens of minutes).
       - name: Package the full runtime bundle (download source for the slim edition)
         shell: pwsh
         run: |
