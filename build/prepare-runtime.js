@@ -1,13 +1,13 @@
 'use strict';
 /**
- * 把 engine/ 整理成「可随包分发」的运行时：build/runtime/
+ * Turn engine/ into a distributable runtime: build/runtime/
  *
- * 关键一步是 system.img 的压缩。AOSP 的 system.img 是 3.1GB 的稀疏镜像，
- * 其中绝大部分是零，gzip 之后只有 ~580MB。单文件发行版的体积几乎全在这里。
- * 再加上 emulator（瘦身后约 340MB）+ Electron + platform-tools，整包约 1.0~1.1GB。
- * 不压缩的话发行版要做到 1.4GB 以上。
- * 代价是首次启动花 1~2 分钟把它展开到用户目录（只做一次），
- * 展开逻辑在 src/core/provision.js 的 materializeImages()。
+ * The key step is compressing system.img. AOSP's system.img is a 3.1 GB sparse image,
+ * mostly zeros, shrinking to ~580 MB with gzip. This dominates the single-file release size.
+ * With the emulator (~340 MB after trimming) + Electron + platform-tools the package lands at 1.0-1.1 GB.
+ * Uncompressed it would be over 1.4 GB.
+ * The cost is a 1-2 minute one-time expansion into the user profile on first launch,
+ * implemented by materializeImages() in src/core/provision.js.
  */
 const fs = require('fs');
 const path = require('path');
@@ -18,7 +18,7 @@ const ROOT = path.join(__dirname, '..');
 const SRC = path.join(ROOT, 'engine');
 const OUT = path.join(ROOT, 'build', 'runtime');
 const MARK = path.join(OUT, '.prepared');
-// 预置的 /data 初始模板（已格式化的 ext4，xz 压缩）。见下方 userdata.img 处注释。
+// Bundled initial /data template (formatted ext4, xz-compressed). See the userdata.img notes below.
 const SEED_USERDATA = path.join(__dirname, 'seed', 'userdata.img.gz');
 
 function sizeOf(p) {
@@ -33,19 +33,19 @@ async function gzipFile(src, dest) {
   );
 }
 
-/** 大镜像用 XZ（LZMA2）：比 gzip -6 再省 ~25%（system.img 1.5GB→~1.1GB）。
- *  默认 9e 极限档；CI 双核可用 XZ_PRESET=6 把时间压到 1/3（体积 +3%）。
+/** Large images use XZ (LZMA2): about 25% smaller than gzip -6 (system.img 1.5 GB -> ~1.1 GB).
+ *  Default preset 9e; on dual-core CI set XZ_PRESET=6 to cut time to 1/3 (+3% size).
  *
- *  实现说明（踩过的坑）：
- *   - 用 python 的 lzma（单线程、稳定）。@napi-rs/lzma 的 createCompressStream 在某些
- *     环境下会 0 字节挂死（实测挂 18 分钟无输出），只能当最后兜底且要带超时。
- *   - 【CI 曾挂死 3 小时的真因】源文件必须 pipe 到子进程的 stdin，并在读完后关闭。
- *     python 侧是 `shutil.copyfileobj(sys.stdin.buffer, z)`，拿不到 EOF 就永远等输入，
- *     stdout 一个字节都不写、进程永不退出。当时只接了 p.stdout，本地因为已有 .xz
- *     被「跳过重复压缩」蒙过去，CI 全新目录必然中招。
- *   - 再加看门狗：压缩器再出意外也会 kill 后落到 gzip 兜底，绝不让打包链路无限挂起。
- *   - 找不到 python / 压缩失败 → gzip -9（体积略大但绝不会挂），
- *     运行时 materializeImages 按扩展名选解压器，两种产物都认。
+ *  Implementation notes (lessons learned):
+ *   - Use python's lzma (single-threaded, stable). @napi-rs/lzma createCompressStream hangs
+ *     at 0 bytes in some environments (18 minutes, no output) - last resort only, with a timeout.
+ *   - [the real cause of a 3-hour CI hang] the source must be piped to the child's stdin and closed.
+ *     On the python side `shutil.copyfileobj(sys.stdin.buffer, z)` waits for input forever without EOF,
+ *     writes nothing to stdout and never exits. Only p.stdout was wired then, and locally an existing .xz
+ *     hid it via "skip duplicate compression"; a fresh CI directory always hit it.
+ *   - Add a watchdog: any compressor mishap is killed and falls back to gzip; packaging never hangs.
+ *   - No python / compression failure -> gzip -9 (slightly larger but never hangs);
+ *     materializeImages picks the decompressor by extension and accepts either artifact.
  */
 function findPython() {
   const { spawnSync } = require('child_process');
@@ -55,7 +55,7 @@ function findPython() {
         encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'],
       });
       if (r.status === 0 && /ok/.test(String(r.stdout))) return cmd;
-    } catch (_) { /* 试下一个 */ }
+    } catch (_) { /* try the next one */ }
   }
   return null;
 }
@@ -65,7 +65,7 @@ async function xzFile(src, dest) {
   const extreme = preset >= 9 && process.env.XZ_NO_EXTREME !== '1';
   const pyPreset = extreme ? '9|lzma.PRESET_EXTREME' : String(preset);
   const dictSize = preset >= 9 ? (1 << 27) : preset >= 6 ? (1 << 26) : (1 << 23);
-  // 默认 2 小时（3GB / 2 核 / preset 6 实测 ~40min）；超时即 kill 并落 gzip 兜底。
+  // Default 2 hours (3 GB / 2 cores / preset 6 measured ~40 min); on timeout kill and fall back to gzip.
   const timeoutMs = Math.max(5000, Number(process.env.XZ_TIMEOUT_MS || 2 * 60 * 60 * 1000));
   const py = findPython();
   if (py) {
@@ -77,25 +77,25 @@ async function xzFile(src, dest) {
       'shutil.copyfileobj(sys.stdin.buffer,z); z.close()',
     ].join(';')], { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true });
 
-    // 先挂监听，避免子进程在我们 await 之前就已经退出而丢掉 close 事件。
+    // Attach listeners first so a child that exits before our await does not lose the close event.
     const exited = new Promise((resolve) => {
       p.on('close', resolve);
       p.on('error', () => resolve(-1));
     });
     const watchdog = setTimeout(() => {
       console.log(`  (xz compression exceeded ${Math.round(timeoutMs / 60000)} minutes; aborting and switching to gzip -9)`);
-      try { p.kill(); } catch (_) { /* 已退出 */ }
+      try { p.kill(); } catch (_) { /* already exited */ }
     }, timeoutMs);
 
     let ok = false;
     try {
-      // 关键：stdin 才是压缩器的输入。pipeline 读完 src 会 end(p.stdin)，
-      // python 收到 EOF 才 flush XZ 尾块并正常退出。
+      // Key: stdin is the compressor input. pipeline ends p.stdin after reading src,
+      // so python gets EOF, flushes the XZ tail block and exits normally.
       const streams = [
         pipeline(fs.createReadStream(src), p.stdin),
         pipeline(p.stdout, fs.createWriteStream(dest)),
       ];
-      // 任一路异常（EPIPE / 写盘失败）立刻终止子进程，别等看门狗。
+      // Any pipeline error (EPIPE / write failure) kills the child immediately; do not wait for the watchdog.
       streams.forEach((s) => s.catch(() => { try { p.kill(); } catch (_) { /* noop */ } }));
       const settled = await Promise.allSettled(streams);
       const code = await exited;
@@ -106,13 +106,13 @@ async function xzFile(src, dest) {
       clearTimeout(watchdog);
     }
     if (ok) return;
-    // 半个 .xz 留着会污染产物，必须删掉再走兜底。
+    // A half-written .xz would pollute the output; delete it before falling back.
     try { fs.rmSync(dest, { force: true }); } catch (_) { /* ignore */ }
     console.log(`  (${py} compression failed; switching to gzip -9)`);
   } else {
     console.log('  (python not found; switching to gzip -9 (slightly larger but reliable))');
   }
-  // 兜底：gzip -9（不是 xz，运行时 materializeImages 按扩展名选择解压器）
+  // Fallback: gzip -9 (not xz; materializeImages selects by extension at runtime)
   await pipeline(
     fs.createReadStream(src),
     zlib.createGzip({ level: 9 }),
@@ -132,7 +132,7 @@ async function main() {
   }
   fs.mkdirSync(OUT, { recursive: true });
 
-  // 1. 直接复制 emulator / platform-tools（不含历史产物）
+  // 1. Copy emulator / platform-tools (excluding historical artifacts)
   for (const dir of ['emulator', 'platform-tools']) {
     const s = path.join(SRC, dir);
     if (!fs.existsSync(s)) continue;
@@ -140,14 +140,14 @@ async function main() {
     fs.cpSync(s, path.join(OUT, dir), { recursive: true });
   }
 
-  // 1.5 瘦身：删掉固定启动参数下永远不会被加载的文件（约 -400MB）
+  // 1.5 Trim: delete files our fixed launch flags never load (~-400 MB)
   if (!process.argv.includes('--no-slim')) {
     console.log('Slimming the runtime…');
     const { slim } = require('./slim-runtime');
     slim(OUT, { aggressive: !process.argv.includes('--safe-slim') });
   }
 
-  // 2. 系统镜像：大镜像压成 .xz（运行时 materializeImages 流式解压），其余原样带
+  // 2. System images: large ones become .xz (streamed by materializeImages); the rest ship as-is
   const imgRoot = path.join(SRC, 'system-images');
   let compressed = 0;
   if (fs.existsSync(imgRoot)) {
@@ -160,12 +160,12 @@ async function main() {
           for (const f of fs.readdirSync(from)) {
             const src = path.join(from, f);
             if (!fs.statSync(src).isFile()) continue;
-            // NOTICE.txt 是 GMS 许可文本（~20MB），运行不需要
+            // NOTICE.txt is the GMS license text (~20 MB) and is not needed at runtime
             if (/^NOTICE\.txt$/i.test(f)) continue;
-            // userdata.img 用仓库里的预置 ext4 模板（seed）：
-            // 官方 sys-img 里那份是 1MB 全零，emulator 扩容时 e2fsck 必然 code=8，
-            // 分区停在 1MB → guest invalid magic → /data 只读 → 全新安装永远开不了机。
-            // 模板只在构建期生成一次（mke2fs），之后随代码走，CI 不需要额外工具链。
+            // userdata.img uses the bundled ext4 template (seed):
+            // the official one is 1 MB of zeros, and e2fsck always returns code=8 when the emulator grows it,
+            // leaving a 1 MB partition -> guest invalid magic -> read-only /data -> a fresh install never boots.
+            // The template is generated once at build time (mke2fs), then travels with the code; CI needs no toolchain.
             if (/^userdata\.img$/i.test(f) && fs.existsSync(SEED_USERDATA)) {
               fs.copyFileSync(SEED_USERDATA, path.join(to, 'userdata.img.gz'));
               console.log('userdata.img uses the bundled ext4 template (build/seed)');
@@ -173,12 +173,12 @@ async function main() {
               continue;
             }
             if (/^(system|vendor|cache|userdata)\.img$/i.test(f) && sizeOf(src) > 32 * 1024 * 1024) {
-              // 大镜像压一份，原图不进包；已有压缩产物（且大小合理）则跳过重复压缩
+              // Compress large images once; originals stay out; skip when a sane compressed artifact exists
               const xz = path.join(to, `${f}.xz`);
               const gz = path.join(to, `${f}.gz`);
-              // gzip 兜底路径产出的是 .gz，也必须认，否则每次重建都会把 3GB 重压一遍。
-              // 阈值用 >1MB 而非压缩比：vendor.img.gz 只有 ~21MB、userdata.img 几乎全零，
-              // 用固定大阈值或「压缩比」判定都会把这些合法产物误判成无效而重压。
+              // The gzip fallback produces .gz which must also count, or every rebuild re-compresses 3 GB.
+              // Threshold is >1 MB rather than a ratio: vendor.img.gz is only ~21 MB and userdata.img is nearly all zeros;
+              // a large fixed threshold or a ratio test would misjudge these valid artifacts and re-compress.
               const existing = [xz, gz].find((p) => sizeOf(p) > 1024 * 1024);
               if (existing) {
                 console.log(`Skipping ${f} (already have ${path.extname(existing)} ${(sizeOf(existing) / 1048576).toFixed(1)} MB)`);
@@ -214,5 +214,5 @@ async function main() {
 if (require.main === module) {
   main().catch((e) => { console.error(e); process.exit(1); });
 }
-// 供回归测试直接调用（不触发 main 的整包准备流程）
+// Exposed for regression tests (does not run main's full preparation flow)
 module.exports = { xzFile, gzipFile, findPython };

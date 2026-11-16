@@ -1,14 +1,14 @@
 'use strict';
 /**
- * 便携版打包：产出 dist/ApkStart-win64-portable/
- *   ApkStart.exe（即 electron.exe 改名）+ resources/app（本应用源码）
- * 无需安装器，解压即用；将来接 electron-builder 出安装包时可复用同一目录结构。
+ * Portable packaging: produces dist/ApkStart-win64-portable/
+ *   ApkStart.exe (renamed electron.exe) + resources/app (this app's source)
+ * No installer needed; unzip and run. electron-builder can reuse the same layout later.
  */
 const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-// 允许指定输出目录（用于目标目录被正在运行的实例占用时，先构建到别处再替换）
+// Allow an alternate output dir (build elsewhere, then swap, when the target is locked by a running instance)
 let OUT = process.env.APKSTART_PACK_OUT
   ? path.resolve(process.env.APKSTART_PACK_OUT)
   : path.join(ROOT, 'dist', 'ApkStart-win64-portable');
@@ -19,29 +19,29 @@ function copy(src, dest) {
 }
 
 console.log('Packing portable build →', OUT);
-// 目标已存在时不做整树删除：部分环境会拦截批量删除，且打包中途失败会丢掉
-// 上一个可用版本。改为先把旧目录改名保留，再全新构建；占用中则自动换目录。
+// Never delete the whole tree when the target exists: some environments block bulk deletes, and a failed
+// build would lose the last good version. Rename the old dir aside and build fresh; if locked, switch dirs.
 if (fs.existsSync(OUT)) {
   try {
     const backup = `${OUT}.prev-${new Date().toISOString().replace(/[:.]/g, '-')}`;
     fs.renameSync(OUT, backup);
     console.log('Previous build kept →', backup);
   } catch (_) {
-    // 某些环境（杀软 / 搜索索引 / 资源管理器）会长时间持有目录句柄，
-    // 整目录改名必然 EBUSY；这时退到带版本号的目录，产物一样可用且不再重名。
+    // Some environments (AV / search indexer / Explorer) hold directory handles for a long time,
+    // so renaming the whole dir returns EBUSY; fall back to a versioned dir - equally usable, no collisions.
     OUT = path.join(ROOT, 'dist', `ApkStart-v${require(path.join(ROOT, 'package.json')).version}-win64-portable`);
     console.log('Output directory is busy; writing to →', OUT);
   }
 }
 fs.mkdirSync(path.join(OUT, 'resources', 'app'), { recursive: true });
 
-// 1. Electron 运行时
+// 1. Electron runtime
 console.log('Copying Electron runtime…');
 copy(ELECTRON_DIST, OUT);
 fs.rmSync(path.join(OUT, 'resources', 'default_app.asar'), { force: true });
 
-// 1.1 语言包瘦身：Electron 自带 55 种语言，合计 41MB，我们只用中文界面。
-//     只留 zh-CN / zh-TW / en-US，其余删掉（-39MB，等于整包小 15%）。
+// 1.1 Locale trimming: Electron ships 55 locales (41 MB); this app needs only a few.
+//     Keep only zh-CN / zh-TW / en-US and delete the rest (-39 MB, about 15% of the package).
 const KEEP_LOCALES = new Set(['zh-CN.pak', 'zh-TW.pak', 'en-US.pak']);
 let localeSaved = 0;
 try {
@@ -51,29 +51,29 @@ try {
     localeSaved += (() => { try { return fs.statSync(path.join(locDir, f)).size; } catch (_) { return 0; } })();
     fs.rmSync(path.join(locDir, f), { force: true });
   }
-} catch (_) { /* 没有 locales 目录也不影响 */ }
+} catch (_) { /* a missing locales directory is fine */ }
 
-// 1.2 没人会点开的文件：更新日志、调试符号、部分无用的 pak（各自 0.1~9MB）
+// 1.2 Files nobody opens: changelogs, debug symbols, unneeded paks (0.1-9 MB each)
 for (const rel of ['LICENSES.chromium.html.bak', 'vk_swiftshader_icd.json.bak']) {
   fs.rmSync(path.join(OUT, rel), { force: true });
 }
 
-// 1.3 可省掉的运行库：
-//     d3dcompiler_47.dll 负责把 ANGLE 的 HLSL 编成 GPU 指令，但 Windows 8.1 起
-//     System32 里就自带同名 DLL，LoadLibrary 找不到包内那份会自然用系统的。
-//     实测删掉后界面/图标/字体渲染完全正常（--smoke 截图对比无差异）。压紧 2.1MB。
-//     注意：vk_swiftshader.dll / vulkan-1.dll 不能删 —— GPU 驱动不可用时 Chromium
-//     靠它做软件兜底，删了会白屏。
+// 1.3 Removable runtime libraries:
+//     d3dcompiler_47.dll compiles ANGLE HLSL into GPU instructions, but Windows 8.1+ ships
+//     an identically named DLL in System32, and LoadLibrary falls back to it when the bundled one is gone.
+//     Removing it renders UI/icons/fonts identically (--smoke screenshots match). Saves 2.1 MB.
+//     Note: vk_swiftshader.dll / vulkan-1.dll must stay - without a GPU driver Chromium
+//     relies on them and would show a white screen.
 let pruneSaved = 0;
 for (const rel of ['d3dcompiler_47.dll']) {
   const p = path.join(OUT, rel);
   try {
     pruneSaved += fs.statSync(p).size;
     fs.rmSync(p, { force: true });
-  } catch (_) { /* 本来就没有 */ }
+  } catch (_) { /* not present anyway */ }
 }
 
-// 2. 应用本体
+// 2. Application itself
 console.log('Copying app…');
 const appDir = path.join(OUT, 'resources', 'app');
 for (const item of ['package.json', 'src', 'LICENSE']) {
@@ -81,10 +81,10 @@ for (const item of ['package.json', 'src', 'LICENSE']) {
   if (fs.existsSync(src)) copy(src, path.join(appDir, item));
 }
 
-// 3. 可选目录
-// engine/ 下只有文档类内容随包分发；大体积运行时组件（emulator、system-images、
-// platform-tools、avd）由应用首次启动时自动从官方源下载，不进安装包。
-// tools/ 是开发期自检脚本（黑窗实测、测速），用户用不到，不再随包分发。
+// 3. Optional directories
+// Only documentation under engine/ ships; the large runtime parts (emulator, system-images,
+// platform-tools, avd) download from official sources on first launch and stay out of the package.
+// tools/ holds dev-time self-check scripts (black-window checks, speed tests) and no longer ships.
 const ENGINE_SKIP = new Set(['emulator', 'system-images', 'platform-tools', 'avd', 'aehd', '_dl', 'qemu']);
 for (const opt of ['engine']) {
   const src = path.join(ROOT, opt);
@@ -97,14 +97,14 @@ for (const opt of ['engine']) {
   }
 }
 
-// 4. 改名主程序
+// 4. Rename the main executable
 fs.renameSync(path.join(OUT, 'electron.exe'), path.join(OUT, 'ApkStart.exe'));
 
-// 5. 版本信息
+// 5. Version info
 const pkg = require(path.join(ROOT, 'package.json'));
 fs.writeFileSync(path.join(OUT, 'VERSION.txt'), `ApkStart ${pkg.version}\nBuild time: ${new Date().toLocaleString('en-US')}\n`);
 
-// 6. 体积报告：每次打包都打印，避免以后又悄悄变胖
+// 6. Size report: printed on every build so the package cannot silently grow
 function dirSize(dir) {
   let n = 0;
   try {

@@ -1,19 +1,19 @@
 'use strict';
 /**
- * 便携包压缩（Windows zip）。
+ * Portable package compression (Windows zip).
  *
- * 为什么不用 PowerShell 的 `Compress-Archive`：
- * 它走 .NET 自带 deflate（相当于 zlib 6 档），同一个 225MB 目录压出来是
- * 105,213,775 字节；7-Zip 的 deflate（`-mx=9`）只要 99,616,541 字节 —— 差了 5.6MB。
- * 而 Gitee 发行版附件单文件上限是 100MB（实测 104,800,000 字节能上传成功，
- * 105,213,775 就被拆成 part1/part2 让用户没法直接解压）。差这 5MB，
- * 结果就是「国内用户拿到的包要么解压不了，要么得下两份」。
+ * Why not PowerShell `Compress-Archive`:
+ * it uses .NET's built-in deflate (roughly zlib level 6); the same 225 MB tree compresses to
+ * 105,213,775 bytes, while 7-Zip deflate (`-mx=9`) needs only 99,616,541 - a 5.6 MB gap.
+ * Gitee release attachments cap a single file at 100 MB (104,800,000 bytes uploaded fine,
+ * 105,213,775 was split into part1/part2 that users cannot extract directly). Those 5 MB mean
+ * "users get either an unextractable package or two downloads".
  *
- * 所以这里固定用 7-Zip 压；找不到 7-Zip 才退回 Compress-Archive（并大声提示）。
+ * So 7-Zip is used unconditionally; only when it is missing do we fall back to Compress-Archive (loudly).
  *
- * 用法：
- *   node build/zip.js <源目录> <输出.zip> [--limit-mb 100]
- * 退出码：0 成功 / 1 失败 / 2 超过体积上限（CI 里按失败处理，别再悄悄发分片包）
+ * Usage:
+ *   node build/zip.js <source dir> <out.zip> [--limit-mb 100]
+ * Exit codes: 0 success / 1 failure / 2 over the size limit (CI treats it as failure; never ship split packages silently)
  */
 const fs = require('fs');
 const path = require('path');
@@ -21,7 +21,7 @@ const { spawnSync } = require('child_process');
 
 const MIB = 1024 * 1024;
 
-/** 在常见位置找 7-Zip 的独立可执行文件（7z.exe 或 7za.exe） */
+/** Locate a standalone 7-Zip executable (7z.exe or 7za.exe) in common locations */
 function find7z() {
   const explicit = process.env.APKSTART_7Z;
   if (explicit && fs.existsSync(explicit)) return explicit;
@@ -33,7 +33,7 @@ function find7z() {
   ];
   for (const p of direct) if (fs.existsSync(p)) return p;
 
-  // PATH 里找（GitHub Actions 的 windows-latest 自带 7-Zip 且在 PATH 上）
+  // Search PATH (GitHub Actions windows-latest ships 7-Zip on PATH)
   const pathDirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
   for (const dir of pathDirs) {
     for (const exe of ['7z.exe', '7za.exe']) {
@@ -42,7 +42,7 @@ function find7z() {
     }
   }
 
-  // electron-builder 下载的 7zip 缓存（本地开发机常见）
+  // electron-builder's downloaded 7zip cache (common on dev machines)
   const cache = path.join(process.env.LOCALAPPDATA || '', 'electron-builder', 'Cache');
   try {
     for (const d of fs.readdirSync(cache)) {
@@ -53,7 +53,7 @@ function find7z() {
         if (fs.existsSync(p)) return p;
       }
     }
-  } catch (_) { /* 没有缓存目录 */ }
+  } catch (_) { /* no cache directory */ }
   return '';
 }
 
@@ -71,7 +71,7 @@ function dirStats(dir) {
   return { files, bytes };
 }
 
-/** 用 7-Zip 压 zip：cwd 设为源目录，让包内路径相对、不带上层目录名 */
+/** Zip with 7-Zip: cwd is the source dir so entries are relative, without the parent folder name */
 function zipWith7z(exe, srcDir, outZip, level = 9) {
   const r = spawnSync(exe, ['a', '-tzip', '-mm=Deflate', `-mx=${level}`, '-bso0', '-bsp0', '-y', outZip, '*'], {
     cwd: srcDir,
@@ -83,7 +83,7 @@ function zipWith7z(exe, srcDir, outZip, level = 9) {
   }
 }
 
-/** 兜底：PowerShell Compress-Archive（体积大 5%，只在没装 7-Zip 时用） */
+/** Fallback: PowerShell Compress-Archive (5% larger; only when 7-Zip is absent) */
 function zipWithPowershell(srcDir, outZip) {
   const ps = `Compress-Archive -Path '${path.join(srcDir, '*')}' -DestinationPath '${outZip}' -CompressionLevel Optimal -Force`;
   const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], {
@@ -95,7 +95,7 @@ function zipWithPowershell(srcDir, outZip) {
   }
 }
 
-/** 压缩结果自检：用应用自己的 zip 解析器读一遍，确认条目数与解压总字节对得上 */
+/** Self-check the archive: read it with the app's own zip parser; entry count and total bytes must match */
 function verify(zipPath, expect) {
   const { ZipFile } = require('../src/core/zip');
   const zip = new ZipFile(zipPath);
