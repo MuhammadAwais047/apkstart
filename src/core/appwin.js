@@ -1,10 +1,10 @@
 'use strict';
 /**
- * 应用窗口：一个正在运行的安卓应用 = 一个干净的 Windows 窗口。
+ * App window: one running Android app = one clean Windows window.
  *
- * 窗口里只有顶部一条 38px 的标题栏（旋转 / 最小化 / 最大化 / 关闭），
- * 下面的整块画面是嵌进来的模拟器窗口（SetParent），所以看不到安卓桌面、
- * 看不到模拟器自带的侧边工具栏，也不会多出第二个任务栏图标。
+ * The window has only a 38px title bar at the top (rotate / minimise / maximise / close),
+ * and the whole area below is the embedded emulator window (SetParent), so the Android desktop is never visible,
+ * nor the emulator's own side toolbar, and no second taskbar icon appears.
  */
 const { BrowserWindow, screen, nativeImage } = require('electron');
 const fs = require('fs');
@@ -14,9 +14,9 @@ const store = require('./store');
 
 const TITLEBAR_H = 38;
 /**
- * 模拟器窗口四周自带 8px 的灰色内边距（Qt 的边框留白），
- * 而真正的 LCD 画面是从 +8px 开始的。把子窗口整体放大 16px 并向左上偏移 8px，
- * 这圈灰边就正好被推到客户区外面，画面干净地贴满四周。
+ * The emulator window carries an 8px grey padding on every side (Qt frame margin),
+ * and the real LCD picture starts at +8px. Growing the child window by 16px and offsetting it up/left by 8px
+ * pushes that grey ring exactly out of the client area, so the picture sits flush on all sides.
  */
 const EMU_PAD = 8;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -30,8 +30,8 @@ class AppWindow {
   constructor({ agent, setOrientation, mouseHook = false, pointerConfig = null }) {
     this.agent = agent;
     this.setOrientation = setOrientation || null;
-    // 全局鼠标钩子只在「应用窗口前台 + 至少一项映射开启」时安装。
-    // pointerConfig 传函数：设置页改了开关，下一次 focus 就生效，不用重启。
+    // The global mouse hook is only installed while the app window is in the foreground with at least one mapping on.
+    // pointerConfig is a function: toggling it on the settings page takes effect on the next focus, no restart needed.
     this.mouseHook = mouseHook;
     this.pointerConfig = pointerConfig;
     this.win = null;
@@ -43,10 +43,10 @@ class AppWindow {
 
   get isOpen() { return !!(this.win && !this.win.isDestroyed()); }
 
-  /** 竖屏 / 横屏下窗口内容的目标尺寸（自动缩放到屏幕内） */
+  /** Target content size for portrait / landscape (scaled down to fit the screen automatically) */
   static sizeFor(area, portrait, landscape) {
     const p = portrait || { w: 540, h: 960 };
-    // 留足边距：标题栏 38 + 上下各 24，左右各 40
+    // Leave enough margin: 38 for the title bar, 24 top and bottom, 40 left and right
     const availH = Math.max(360, (area.h || 1040) - TITLEBAR_H - 48);
     const availW = Math.max(300, (area.w || 1920) - 80);
     const k = landscape
@@ -54,7 +54,7 @@ class AppWindow {
       : Math.min(availH / p.h, availW / p.w);
     const w = Math.round((landscape ? p.h : p.w) * k);
     const h = Math.round((landscape ? p.w : p.h) * k);
-    // 双保险：绝不超过屏幕可用区，否则会被系统裁掉，看起来就是「有黑边 / 没填满」
+    // Double safety: never exceed the work area, or the system clips it and it looks like "black bars / not filled"
     return {
       w: Math.max(320, Math.min(w, Math.round(availW))),
       h: Math.max(360, Math.min(h, Math.round(availH))),
@@ -77,7 +77,7 @@ class AppWindow {
   }
 
   /**
-   * 打开（或复用）应用窗口。
+   * Open (or reuse) the app window.
    * @param {object} o { pkg, label, iconPath, portrait, fullscreen, onClosed }
    */
   open(o) {
@@ -127,21 +127,21 @@ class AppWindow {
     });
 
     this.win.loadFile(path.join(__dirname, '..', 'ui', 'shell.html'));
-    // 页面标题会把窗口标题改成 shell.html 的 <title>，任务栏就认不出是哪个应用了，
-    // 这里挡住，让 OS 标题一直等于应用名（任务栏悬浮提示、Alt+Tab 都靠它）。
+    // A page title would overwrite the window title with shell.html's <title>, and the taskbar would no longer know which app this is,
+    // so block it and keep the OS title equal to the app name (the taskbar tooltip and Alt+Tab rely on it).
     this.win.webContents.on('page-title-updated', (e) => {
       e.preventDefault();
-      try { this.win.setTitle(label || 'ApkStart'); } catch (_) { /* 窗口可能已销毁 */ }
+      try { this.win.setTitle(label || 'ApkStart'); } catch (_) { /* the window may already be destroyed */ }
     });
     this.win.once('ready-to-show', () => {
       this.win.show();
       this._push();
     });
 
-    // Electron 最大化时窗口尺寸会分好几步才稳定（OS 动画、DPI 重算），
-    // 单次 40ms 防抖的 fit 常常抓到中间态，结果嵌入画面只占左上角一条，
-    // 右边一大片空白 —— 就是用户截图里「最大化后没填满」。
-    // 改成连续多轮贴合收敛，每轮都按最新的 getContentBounds 重算。
+    // When Electron maximises, the window size settles over several steps (OS animation, DPI re-computation),
+    // so a single 40ms debounced fit often catches an intermediate state, leaving the embedded picture as a strip in the top-left
+    // with a large blank area on the right - exactly the "not filled after maximising" seen in screenshots.
+    // Now it converges over several consecutive fit rounds, each recomputed from the latest getContentBounds.
     const refit = () => this.scheduleFit(6);
     this.win.on('resize', refit);
     this.win.on('move', refit);
@@ -154,14 +154,14 @@ class AppWindow {
     this.win.on('minimize', () => { this.agent.hide().catch(() => {}); });
     this.win.on('close', () => { this._closing = true; });
     this.win.on('closed', () => {
-      if (this._selfClose) return;   // close() 自己在 park 完成后收尾
+      if (this._selfClose) return;   // close() finishes the job itself after park completes
       this.win = null;
       const pkg = this.pkg;
       this.pkg = null;
       this._closing = false;
-      // 不走 close() 的关闭路径（Alt+F4、任务栏关闭、系统关机）也必须停掉安卓应用、
-      // 把模拟器窗口摘下来。否则窗口消失了但应用还在后台跑，用户再点开会因为
-      // 「已在运行」直接切过去，看起来就是「关不掉」。
+      // Close paths that bypass close() (Alt+F4, taskbar close, system shutdown) must still stop the Android app
+      // and detach the emulator window. Otherwise the window is gone but the app keeps running in the background, and the next click
+      // switches straight to it as "already running", which looks like "it cannot be closed".
       if (pkg && this._onCloseApp) {
         try { this._onCloseApp(pkg); } catch (_) { /* ignore */ }
       }
@@ -169,8 +169,8 @@ class AppWindow {
         if (this._closedCb) this._closedCb(pkg);
       });
     });
-    // 只在「应用窗口真正处于前台」且至少一项鼠标映射开启时装全局钩子；
-    // 失焦/关闭立即卸载，绝不让 ApkStart 在后台拖慢整个系统的鼠标。
+    // Install the global hook only while the app window is genuinely in the foreground and at least one mouse mapping is on;
+    // uninstall it immediately on blur or close, so ApkStart never slows down the system mouse in the background.
     this.win.on('focus', () => this._syncHook(true));
     this.win.on('blur', () => this._syncHook(false));
 
@@ -186,8 +186,8 @@ class AppWindow {
 
   _syncHook(active) {
     const opts = this._pointerOptions();
-    // 游戏/低延迟模式下完全不装全局鼠标钩子：WH_MOUSE_LL 对桌面每个鼠标事件
-    // 都同步回调，会明显增加指针延迟；FPS 需要的是 Qt 窗口直接收到原始输入。
+    // In game / low-latency mode the global mouse hook is not installed at all: WH_MOUSE_LL calls back synchronously
+    // for every mouse event on the desktop and clearly adds pointer latency; FPS games need the Qt window to get raw input directly.
     const game = !!(store.getSettings().engine && store.getSettings().engine.priorityMode === 'game');
     const on = !!active && opts.enabled && !game;
     if (this.agent && typeof this.agent.setHook === 'function') {
@@ -195,11 +195,11 @@ class AppWindow {
     }
   }
 
-  /** 设置页改了鼠标映射：按当前焦点重新同步一次（不重装钩子线程） */
+  /** Mouse mappings changed on the settings page: resync once for the current focus (without reinstalling the hook thread) */
   refreshPointer() {
     const focused = this.isOpen && !!this.win.isFocused();
     if (!focused) {
-      // 窗口没在前台：只卸载，别让钩子在后台空转
+      // Window not in the foreground: only uninstall, never let the hook idle in the background
       if (this.agent && typeof this.agent.setHook === 'function') {
         this.agent.setHook(false).catch(() => {});
       }
@@ -220,16 +220,16 @@ class AppWindow {
         ...this.state,
         iconUrl: this.iconUrl || '',
       });
-    } catch (_) { /* 窗口可能刚关闭 */ }
+    } catch (_) { /* the window may have just closed */ }
   }
 
   setIcon(p) { this.iconUrl = iconUrl(p); this._push(); }
 
   /**
-   * 把模拟器窗口嵌进当前窗口，并铺满标题栏以下的区域。
-   * 常驻压制不关闭：它会跳过「已经嵌进我们窗口」的那一个，其余窗口（含 qemu /
-   * netsimd 的控制台黑窗）继续压住 —— 关了反而会给它们再露一次脸的机会。
-   * 模拟器窗口偶尔还没创建好（快照恢复太快的机器上），这里重试两次。
+   * Embed the emulator window into the current window and fill the area below the title bar.
+   * Resident suppression stays on: it skips the one already embedded in our window and keeps suppressing the rest (including
+   * the qemu / netsimd console windows) - turning it off would just give them another chance to flash.
+   * The emulator window is occasionally not created yet (on machines restoring the snapshot too fast), so retry twice here.
    */
   async embed() {
     if (!this.isOpen) return false;
@@ -245,8 +245,8 @@ class AppWindow {
       // eslint-disable-next-line no-await-in-loop
       await sleep(attempt < 2 ? 300 : 800);
     }
-    // 把失败原因带出去：上层会写进 app.log，出问题时一眼能看出是「没找到模拟器窗口」
-    // 还是「SetParent 失败」，不用再靠猜。
+    // Carry the failure reason out: the caller writes it to app.log, so it is obvious whether "emulator window not found"
+    // or "SetParent failed", with no guessing.
     this.lastEmbedError = last ? (last.error || `emu=${last.emu}`) : 'no-response';
     return false;
   }
@@ -256,7 +256,7 @@ class AppWindow {
     await this.agent.fit(this._rect()).catch(() => {});
   }
 
-  /** 模拟器子窗口应该占据的矩形（物理像素，已把 8px 内边距推出可视区） */
+  /** Rectangle the emulator child should occupy (physical pixels, with the 8px padding pushed out of view) */
   _rect() {
     const sf = this._scale();
     const b = this.win.getContentBounds();
@@ -266,13 +266,13 @@ class AppWindow {
       y: top - EMU_PAD,
       w: Math.round(b.width * sf) + EMU_PAD * 2,
       h: Math.round((b.height - TITLEBAR_H) * sf) + EMU_PAD * 2,
-      // 上面那条 -EMU_PAD 会压到标题栏上，交给窗口代理裁掉（见 agent.fit 的 clipTop）
+      // The -EMU_PAD strip above overlaps the title bar and is clipped by the window agent (see clipTop in agent.fit)
       clipTop: EMU_PAD,
     };
   }
 
   /**
-   * @param {number} rounds 连续贴合几轮（窗口尺寸变化时每轮都重算最新 bounds）
+   * @param {number} rounds how many consecutive fit rounds (each recomputes the latest bounds when the window size changes)
    */
   scheduleFit(rounds = 1) {
     if (!this.isOpen) return;
@@ -299,17 +299,17 @@ class AppWindow {
   }
 
   /**
-   * 横竖屏切换（标题栏旋转按钮）= 真正把「物理面板」换成横屏或竖屏。
+   * Orientation switch (the rotate button in the title bar) = genuinely swapping the "physical panel" between landscape and portrait.
    *
-   * 为什么必须这么做（踩过的坑）：
-   *   - 改 wm size：只改 Android 逻辑分辨率，模拟器的物理 LCD 仍是竖的，
-   *     Qt 把画面贴在左上角 -> 画面躺倒 90°、只占一条、四周黑边、点击坐标错位；
-   *   - 改 wm density：framebuffer 尺寸不变，画面不会铺满，最大化后右侧一大片空；
-   *   - adb emu rotate：只转画面内容，系统里还是竖屏。
-   * 唯一能得到「正立 + 铺满」横屏的办法，就是把 hw.lcd.width/height 换成
-   * 1280x720 并重启模拟器。重启约 30~60 秒，所以这里只做一次、并给出明确提示。
+   * Why it has to work this way (lessons from dead ends):
+   *   - wm size: only the Android logical resolution changes; the emulator's physical LCD stays portrait,
+   *     Qt pins the picture to the top-left -> the picture lies on its side 90 degrees, occupies one strip, has black bars and taps land off-target;
+   *   - wm density: the framebuffer size is unchanged, the picture never fills, leaving a large blank area on the right when maximised;
+   *   - adb emu rotate: only the picture content rotates; the system stays portrait.
+   * The only way to get an upright, filled landscape is to change hw.lcd.width/height to
+   * 1280x720 and restart the emulator. That takes about 30-60 seconds, so it is done once with a clear notice.
    *
-   * @param {(next:boolean)=>Promise<boolean>} [onRestart] 由上层注入的重启实现
+   * @param {(next:boolean)=>Promise<boolean>} [onRestart] restart implementation injected by the caller
    */
   async rotate(onRestart) {
     if (!this.isOpen) return this.state.landscape;
@@ -320,7 +320,7 @@ class AppWindow {
       if (ok) {
         this.state.landscape = next;
         this._push();
-        // 面板尺寸变了，窗口宽高比跟着换；贴合几轮收敛
+        // the panel size changed, so the window aspect ratio follows; converge over several fit rounds
         for (let i = 0; i < 5; i += 1) {
           // eslint-disable-next-line no-await-in-loop
           await sleep(400);
@@ -331,14 +331,14 @@ class AppWindow {
         return next;
       }
     }
-    // 没有注入重启实现（或失败）时退回 density 方案，至少能切排版
+    // Without an injected restart (or if it fails), fall back to the density approach so at least the layout flips
     if (this.setOrientation) await this.setOrientation(next).catch(() => {});
     this.state.landscape = next;
     this.setState({ ready: true, tip: '' });
     return next;
   }
 
-  /** 需要时切到指定方向（全屏=横屏，窗口=竖屏） */
+  /** Switch to the given orientation when needed (full screen = landscape, windowed = portrait) */
   async setLandscape(want) {
     if (!this.isOpen) return this.state.landscape;
     if (!!this.state.landscape === !!want) return this.state.landscape;
@@ -355,11 +355,11 @@ class AppWindow {
   minimize() { if (this.isOpen) this.win.minimize(); }
 
   /**
-   * 关闭窗口。默认同时停掉这个安卓应用（省内存），但保留引擎，下次点开是秒开。
+   * Close the window. By default the Android app stops too (saves memory) while the engine is kept, so the next launch is instant.
    *
-   * 顺序很重要：必须先把模拟器窗口从宿主窗口上「摘下并藏好」，再销毁宿主。
-   * 反过来的话 Windows 会把跨进程的子窗口重新挂到桌面、并保持它原来的可见状态，
-   * 用户桌面上就会凭空多出一个 "Android Emulator - apkstart5554" 的黑窗。
+   * Order matters: detach and hide the emulator window from the host first, then destroy the host.
+   * Otherwise Windows re-parents the cross-process child onto the desktop and keeps its previous visibility,
+   * leaving a stray "Android Emulator - apkstart5554" black window on the user's desktop.
    */
   close({ keepApp = false } = {}) {
     if (!this.isOpen) return;

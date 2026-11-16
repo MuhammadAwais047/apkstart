@@ -1,14 +1,14 @@
 'use strict';
 /**
- * 把 Android Emulator 的 Qt 窗口打扮成「一个应用一个原生窗口」。
+ * Dress the Android Emulator's Qt window up as "one native window per app".
  *
- * 为什么不投屏：无头模式下 SurfaceFlinger 不出 VSYNC（实测 screenrecord 3 秒只有 2 帧），
- * 软件投屏既卡又吃 CPU。带窗口的模拟器本身就是原生 60fps + 原生鼠标键盘，
- * 这里只做「改标题 / 换图标 / 设尺寸 / 全屏」这几下 Win32 操作，成本近乎为零。
+ * Why not screen mirroring: in headless mode SurfaceFlinger emits no VSYNC (measured: screenrecord produced 2 frames in 3 seconds),
+ * and software mirroring is jerky and CPU-hungry. The windowed emulator already gives native 60fps with native mouse and keyboard,
+ * so this only performs a few Win32 operations - title, icon, size, full screen - at almost zero cost.
  *
- * PowerShell 是 Windows 自带组件，脚本为纯 ASCII，中文标题通过 UTF-8 JSON 传入，
- * 避免 Windows PowerShell 5.1 按 ANSI 读 .ps1 造成乱码。
- * 任何失败都静默降级：窗口照样能用，只是没有改名/全屏。
+ * PowerShell ships with Windows; the script is pure ASCII and titles travel as UTF-8 JSON,
+ * avoiding the mojibake Windows PowerShell 5.1 produces when it reads .ps1 files as ANSI.
+ * Any failure degrades silently: the window still works, just without the rename or full screen.
  */
 const fs = require('fs');
 const os = require('os');
@@ -53,7 +53,7 @@ function call(params) {
   });
 }
 
-/** 读取当前窗口位置，用于「记住每个应用的窗口大小」 */
+/** Read the current window position, used to "remember each app's window size" */
 async function getBounds(pid) {
   const r = await call({ pid, action: 'get' });
   if (!r || !Number(r.W) || !Number(r.H)) return null;
@@ -65,12 +65,12 @@ async function getBounds(pid) {
 }
 
 /**
- * 让运行时窗口表现为当前应用。
+ * Make the runtime window present itself as the current app.
  * @param {object} o { pid, label, icon, mode:'window'|'fullscreen', bounds, screen }
  */
 async function present(o) {
   const { pid, label, icon, mode, bounds, screen } = o || {};
-  // pid=0 是合法输入：复用别的进程拉起的模拟器时没有句柄，交给脚本按进程名找窗口
+  // pid=0 is a valid input: when reusing an emulator started by another process there is no handle, so the script finds the window by process name
   if (pid === undefined || pid === null) return null;
   return call({
     pid,
@@ -84,7 +84,7 @@ async function present(o) {
 
 async function focus(pid) { return call({ pid, action: 'focus' }); }
 
-/** 通知资源管理器刷新图标/快捷方式，避免新建的桌面图标要按 F5 才出现 */
+/** Ask Explorer to refresh icons/shortcuts so a new desktop icon does not need F5 */
 async function refreshShell() { return call({ pid: 0, action: 'refresh' }); }
 
 module.exports = { call, getBounds, present, focus, refreshShell, SCRIPT };

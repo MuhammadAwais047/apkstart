@@ -1,7 +1,7 @@
 'use strict';
 /**
- * APK 元信息提取：包名 / 版本 / 应用名 / 启动 Activity / 图标 / ABI
- * 全部离线完成，不需要 aapt、不需要 adb、不需要联网。
+ * APK metadata extraction: package name / version / app name / launch Activity / icon / ABI
+ * Everything is done offline: no aapt, no adb, no network.
  */
 const fs = require('fs');
 const { ZipFile } = require('./zip');
@@ -24,7 +24,7 @@ function isLauncherActivity(node) {
 }
 
 function pickIconFromZip(zip) {
-  // 兜底：在 res/ 里找最大的、名字像图标的位图（png / webp / jpg 都认）
+  // Fallback: pick the largest icon-looking bitmap under res/ (png / webp / jpg all accepted)
   const candidates = zip.names().filter((n) => /^res\/.*\.(png|webp|jpe?g)$/i.test(n));
   const scored = candidates.map((n) => {
     const e = zip.entries.get(n);
@@ -48,7 +48,7 @@ function pickIconFromZip(zip) {
 
 const IMG_RE = /\.(png|webp|jpe?g)$/i;
 
-/** 取节点上的 drawable / src 引用，还原成 APK 内的文件路径 */
+/** Read the drawable / src reference on a node and resolve it to a file path inside the APK */
 function drawableFileOf(node, res) {
   for (const name of ['drawable', 'src']) {
     const a = attr(node, name);
@@ -64,10 +64,10 @@ function drawableFileOf(node, res) {
 }
 
 /**
- * 在图标 XML 的节点树里找可用位图。深度优先、XML 最多再展开 3 层：
- * 现代图标常见 `<adaptive-icon><foreground><inset><drawable/></inset></foreground>`，
- * 或者 `<layer-list><item><bitmap android:src="@drawable/x"/></item></layer-list>`，
- * 只认一层属性会直接落到「品牌占位图」。
+ * Find a usable bitmap in the icon XML tree. Depth-first, expanding at most 3 XML levels:
+ * Modern icons commonly look like `<adaptive-icon><foreground><inset><drawable/></inset></foreground>`,
+ * or `<layer-list><item><bitmap android:src="@drawable/x"/></item></layer-list>`,
+ * and matching only one level of attributes falls straight through to the branded placeholder.
  */
 function iconFromNode(zip, node, res, depth = 0) {
   const file = drawableFileOf(node, res);
@@ -88,7 +88,7 @@ function iconFromNode(zip, node, res, depth = 0) {
   return null;
 }
 
-/** 从自适应图标 / layer-list 的 XML 里找出可用的前景/背景位图 */
+/** Find the usable foreground/background bitmap in an adaptive-icon / layer-list XML */
 function iconFromXml(zip, xmlBuffer, res, depth = 0) {
   let root;
   try {
@@ -96,22 +96,22 @@ function iconFromXml(zip, xmlBuffer, res, depth = 0) {
   } catch (_) {
     return null;
   }
-  // 先按规范顺序找 foreground → background → monochrome
+  // First try the spec order: foreground → background → monochrome
   for (const key of ['foreground', 'background', 'monochrome']) {
     const node = root.children.find((c) => c.name === key) || (root.name === key ? root : null);
     if (!node) continue;
     const hit = iconFromNode(zip, node, res, depth);
     if (hit) return hit;
   }
-  // 再整棵树扫一遍（layer-list / bitmap / inset 这类没有固定子节点名的）
+  // Then scan the whole tree (layer-list / bitmap / inset nodes have no fixed child names)
   return iconFromNode(zip, root, res, depth);
 }
 
 /**
- * 解析一个 APK 的元信息。
- * 走文件版 ZIP 读取器（只读中央目录 + 按需读条目），因此**不把整个 APK 读进内存**：
- * 旧版 fs.readFileSync 整包读会让 2GB 以上的安装包直接失败（Node 单 Buffer 上限），
- * 低内存机器上大包也容易被 OOM 打断。
+ * Parse the metadata of one APK.
+ * Uses the file-based ZIP reader (central directory only, entries read on demand), so the whole APK is **never loaded into memory**:
+ * the old fs.readFileSync whole-package read failed outright for installers above 2GB (Node single-Buffer limit),
+ * and large packages were also easily killed by OOM on low-memory machines.
  */
 function parseApk(filePath) {
   const stat = fs.statSync(filePath);
@@ -124,7 +124,7 @@ function parseApk(filePath) {
   }
 }
 
-/** parseApk 的主体：调用方负责关闭 zip */
+/** Body of parseApk: the caller is responsible for closing the zip */
 function parseApkZip(zip, filePath, stat) {
   if (!zip.has('AndroidManifest.xml')) {
     throw new Error('AndroidManifest.xml missing: this is not a single APK (it may be a .apks/.xapk split package)');
@@ -133,8 +133,8 @@ function parseApkZip(zip, filePath, stat) {
   const manifestBuf = zip.read('AndroidManifest.xml');
   const manifest = parseAxml(manifestBuf);
 
-  // package 是 manifest 上的**非命名空间**属性（ns=''），必须按「任意命名空间」找：
-  // attrValue 默认只认 android 命名空间，传 null 表示不限定命名空间。
+  // package is a **non-namespaced** attribute on the manifest (ns=''), so it must be looked up as "any namespace":
+  // attrValue only matches the android namespace by default; passing null means any namespace.
   const packageName = attrValue(manifest, 'package', null);
   if (!packageName) throw new Error('No package name found in the manifest');
 
@@ -148,13 +148,13 @@ function parseApkZip(zip, filePath, stat) {
 
   const app = children(manifest, 'application')[0] || { children: [], attrs: [] };
 
-  // ---- 资源表（用于解析 @0x7f 引用）----
+  // ---- Resource table (for resolving @0x7f references) ----
   let res = null;
   if (zip.has('resources.arsc')) {
     try { res = new ResTable(zip.read('resources.arsc')); } catch (_) { res = null; }
   }
 
-  // ---- 应用名 ----
+  // ---- App name ----
   let label = null;
   const labelAttr = attr(app, 'label');
   if (labelAttr) {
@@ -166,7 +166,7 @@ function parseApkZip(zip, filePath, stat) {
     label = label.charAt(0).toUpperCase() + label.slice(1);
   }
 
-  // ---- 启动 Activity ----
+  // ---- Launch Activity ----
   let launchActivity = null;
   const acts = children(app, 'activity').concat(children(app, 'activity-alias'));
   const launcher = acts.find(isLauncherActivity);
@@ -183,7 +183,7 @@ function parseApkZip(zip, filePath, stat) {
     }
   }
 
-  // ---- 图标 ----
+  // ---- Icon ----
   let icon = null;
   const iconAttr = attr(app, 'icon') || attr(app, 'roundIcon');
   if (iconAttr) {
@@ -201,7 +201,7 @@ function parseApkZip(zip, filePath, stat) {
   }
   if (!icon) icon = pickIconFromZip(zip);
 
-  // ---- ABI（判断 x86 运行时能否直接跑 ARM 原生库）----
+  // ---- ABI (whether the x86 runtime can run ARM native libraries directly) ----
   const abis = [...new Set(zip.names()
     .filter((n) => n.startsWith('lib/'))
     .map((n) => n.split('/')[1])
@@ -224,7 +224,7 @@ function parseApkZip(zip, filePath, stat) {
   };
 }
 
-/** 轻量校验：只看头部是不是 PK\x03\x04 */
+/** Lightweight check: just look at whether the header is PK\x03\x04 */
 function quickCheck(filePath) {
   try {
     const fd = fs.openSync(filePath, 'r');

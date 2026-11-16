@@ -13,7 +13,7 @@ const state = {
   menuPkg: null,
 };
 
-/* ---------------- 工具 ---------------- */
+/* ---------------- Utilities ---------------- */
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
@@ -43,16 +43,16 @@ function relTime(ts) {
 }
 
 /**
- * 迷你 toast
+ * Mini toast
  *
- * 同一类消息做去重 + 数量上限：
- * 安装失败时里面有「运行时启动日志」在持续推送，以前每条都新建一个 toast，
- * 于是屏幕上会不停叠加同一条错误，看起来像「失败信息一直循环」。
+ * Dedupe by message type plus a count cap:
+ * on install failure the runtime log keeps streaming; each line used to create a toast,
+ * stacking the same error until it looked like the failure message looped forever.
  */
 let _toastSeq = 0;
 function toast({ title, body = '', type = 'info', progress = null, sticky = false, spinner = false }) {
   const wrap = $('toastWrap');
-  // ① 去重：同样的标题 + 正文（4 秒内）只刷新那一条，不叠加
+  // (1) Dedupe: same title + body within 4s refreshes that one toast instead of stacking
   const key = `${title}|${body}`;
   const dup = [...wrap.children].find((n) => n.dataset.key === key && Date.now() - Number(n.dataset.at || 0) < 4000);
   if (dup) {
@@ -66,7 +66,7 @@ function toast({ title, body = '', type = 'info', progress = null, sticky = fals
       },
     };
   }
-  // ② 上限：同时最多 4 条，超出先挤掉最旧的
+  // (2) Cap: at most 4 at once; the oldest is evicted first
   while (wrap.children.length >= 4) wrap.firstElementChild.remove();
 
   const el = document.createElement('div');
@@ -111,7 +111,7 @@ function toast({ title, body = '', type = 'info', progress = null, sticky = fals
   return ctl;
 }
 
-/* ---------------- 渲染 ---------------- */
+/* ---------------- Rendering ---------------- */
 
 function visibleApps() {
   const q = state.filter.trim().toLowerCase();
@@ -156,7 +156,7 @@ function renderGrid() {
   `).join('');
 }
 
-/* ---------------- 数据刷新 ---------------- */
+/* ---------------- Data refresh ---------------- */
 
 async function refreshApps() {
   try {
@@ -237,11 +237,11 @@ async function refreshStatus() {
   }
 }
 
-/* ---------------- 运行时部署（固定在设置里） ---------------- */
+/* ---------------- Runtime deployment (lives in Settings) ---------------- */
 
 /**
- * 运行时/部署/自检面板现在都收在「设置」里，主界面只留已安装应用。
- * 保留 showSetup 给托盘菜单与 ui:navigate 复用，语义改为「打开设置并定位到运行时」。
+ * Runtime / deployment / self-check panels now live in Settings; the main view only lists installed apps.
+ * showSetup stays for the tray menu and ui:navigate, now meaning "open Settings at the runtime section".
  */
 function showSetup(on) {
   if (!on) { $('setupGuide').hidden = true; return; }
@@ -275,8 +275,8 @@ function renderSetup(s) {
   const hv = env.hypervisor || {};
   const accel = env.accel || s.accel || {};
 
-  // 启动即见已安装应用：不再用部署向导整屏接管主界面，
-  // 状态只在设置里的运行时面板 + 底部状态条上体现。
+  // Installed apps are visible immediately: the deploy wizard no longer takes over the main view,
+  // status lives in the Settings runtime panel and the bottom status bar only.
   const accelOk = accel.ok || hv.whpx;
   const adbDone = !!(env.adb && env.adb.ok);
   const emuDone0 = !!(env.emulator && env.emulator.ok);
@@ -303,8 +303,8 @@ function renderSetup(s) {
   const busy = state.setupBusy;
   const booting = s.phase === 'booting';
 
-  // 只保留一个步骤：下载、参数自适应、开机全部由「一键完成」串起来，
-  // 且首次启动会在后台自动跑，用户不需要逐步点击。
+  // One step only: download, parameter adaptation and boot are chained by "one-click setup",
+  // and the first launch runs it in the background with no step-by-step clicking.
   const allDone = !!(env.adb && env.adb.ok) && emuDone && imgDone;
   const left = [];
   if (!(env.adb && env.adb.ok)) left.push('adb toolchain');
@@ -332,8 +332,8 @@ function renderSetup(s) {
   $('setupSteps').innerHTML = stepRow(step);
   $('btnDeployAll').disabled = !!busy;
   $('btnDeployAll').textContent = busy ? 'Preparing…' : (allDone ? 'Done · click to re-check' : 'Set up everything');
-  // 「上次为什么没起来」优先显示落盘的失败记录：进程重启后内存里的 diagnosis 是空的，
-  // 只显示 autoProfile 会让用户完全看不出原因（issue #20/#25 的报告就是这样）。
+  // Show the persisted failure record for "why did it not start": in-memory diagnosis is empty after a restart,
+  // and showing only autoProfile leaves no clue (exactly the issue #20/#25 reports).
   const lf = s.lastFailure;
   const lastMsg = (lf && lf.diagnosis && lf.diagnosis.title)
     ? `Last start failed: ${lf.diagnosis.title}`
@@ -348,7 +348,7 @@ function store_getDiskSize() {
 
 function setStepBusy(key, on) {
   state.setupBusy = on ? key : null;
-  // 五步已合并成一行，所有子步骤的进度都落在这唯一的进度条上
+  // Five steps merged into one line; all sub-step progress feeds this single bar
   const row = $('setupSteps').querySelector('[data-step="all"]');
   if (row) {
     row.classList.toggle('busy', !!on);
@@ -377,8 +377,8 @@ async function deployAll() {
   if (state.setupBusy) return;
   setStepBusy('all', true);
   try {
-    // 一次调用把 adb / 引擎 / 系统镜像全装完，进度统一显示在唯一那一行
-    // 用户点「一键部署」属于明确的手动重试，绕过失败冷却
+    // One call installs adb / engine / system image; progress shows on that single line
+    // Clicking "one-click setup" is an explicit manual retry and bypasses the failure cooldown
     const r = await api.autoDeploy({ force: true });
     if (!r || !r.ok) {
       toast({ title: 'Setup failed', body: (r && r.error) || 'Check your network and try again', type: 'error', sticky: true });
@@ -451,9 +451,9 @@ async function markInstalled() {
 
 
 
-/* ---------------- 安装 ---------------- */
+/* ---------------- Install ---------------- */
 
-/** 把安装失败翻译成「下一步该做什么」，只对最常见的几种做提示，其它原样显示 */
+/** Turn an install failure into "what to do next" for the common cases; show others verbatim */
 function friendlyInstallErrorText(msg) {
   const s = String(msg || 'Unknown error');
   if (/INSUFFICIENT_STORAGE|not enough space|空间不足|ENOSPC/i.test(s)) {
@@ -471,9 +471,9 @@ function friendlyInstallErrorText(msg) {
   return s;
 }
 
-/* 当前那条「正在安装…」的 sticky 提示。install:error 事件要能把它收掉：
- * 主进程是先 send('install:error') 再让 invoke 失败的，两者都可能到得很晚，
- * 只靠 catch 收会出现「报错了右下角还在转圈」。 */
+/* The current sticky "installing..." toast. The install:error event must clear it:
+ * the main process sends install:error then fails the invoke, and both may arrive late;
+ * a catch alone leaves the spinner running after the error. */
 let installToast = null;
 
 async function installFiles(paths) {
@@ -507,10 +507,10 @@ async function installFiles(paths) {
       ok++;
     } catch (e) {
       failed++;
-      // 先把那条「正在安装…」的 sticky 提示收掉，否则它会一直转圈、还继续被
-      // 运行时日志刷新 —— 用户看到的就是「失败信息一直在循环」。
-      // 错误提示统一由下面的 install:error 监听器负责（带文件名与中文原因），
-      // 这里不再重复弹一条。
+      // Clear the sticky "installing..." toast first, or it keeps spinning and keeps getting
+      // refreshed by runtime logs - the "failure message loops forever" symptom.
+      // The install:error listener below owns error toasts (with file name and reason),
+      // so no duplicate toast is raised here.
       try { off(); } catch (_) { /* ignore */ }
       t.dismiss();
       if (installToast === t) installToast = null;
@@ -524,7 +524,7 @@ async function installFiles(paths) {
   if (ok && !failed) $('search').value = '';
 }
 
-/* ---------------- 应用操作 ---------------- */
+/* ---------------- App actions ---------------- */
 
 async function launchApp(pkg) {
   const app = state.apps.find((a) => a.package === pkg);
@@ -537,7 +537,7 @@ async function launchApp(pkg) {
   });
   const r = await api.launch(pkg);
   if (r.ok) {
-    // 应用有自己的窗口，主界面自动收起；这里只留一句提示，然后隐藏窗口
+    // The app has its own window and the main view collapses; show a hint, then hide the window
     t.update({ title: 'Started', body: 'The app runs in its own window (rotate from the top bar).', type: 'ok' });
     setTimeout(t.dismiss, 1600);
     setTimeout(() => api.winHide(), 900);
@@ -572,7 +572,7 @@ async function uninstall(pkg) {
   }
 }
 
-/* ---------------- 右键菜单 ---------------- */
+/* ---------------- Context menu ---------------- */
 
 const MENU_ITEMS = [
   { key: 'open', label: 'Open app', kbd: 'Enter' },
@@ -633,9 +633,9 @@ async function handleMenu(act) {
   }
 }
 
-/* ---------------- 设置 ---------------- */
+/* ---------------- Settings ---------------- */
 
-// ---------------- 安卓系统设置 ----------------
+// ---------------- Android system settings ----------------
 
 let volumeTimer = null;
 
@@ -742,7 +742,7 @@ function fillSettings(s) {
   $('portraitField').hidden = $('setDisplayMode').value === 'fullscreen';
 }
 
-/** 数据分区实际大小 + 磁盘余量，显示在设置页容量选择下方 */
+/** Actual data partition size + free disk, shown under the capacity choice in Settings */
 async function refreshDataInfo() {
   const el = $('dataNote');
   if (!el) return;
@@ -791,11 +791,11 @@ function closeSettings() {
   $('settingsMask').classList.remove('on');
 }
 
-/* ---------------- 软件更新 ---------------- */
+/* ---------------- Software update ---------------- */
 
 let lastUpdate = null;
 
-/** 把一次检查结果画到设置面板（也用于启动时静默检查推送过来的状态） */
+/** Render an update check result in Settings (also used for the silent startup check) */
 function renderUpdate(info) {
   lastUpdate = info || null;
   const cur = $('updateCurrent');
@@ -808,8 +808,8 @@ function renderUpdate(info) {
 
   if (info.ok === false) {
     st.textContent = `Check failed: ${info.error || 'network unavailable'}`;
-    // 检查失败也要给一条出路：直接把发布页打开，用户至少能手动下载。
-    // 以前这里是「什么都不显示」，用户只会觉得「更新功能坏了」。
+    // A failed check still needs an exit: open the release page so users can download manually.
+    // It used to show nothing, which reads as "updates are broken".
     showUpdateBtn(true);
     btn.textContent = 'Open download page';
     btn.dataset.mode = 'manual';
@@ -818,8 +818,8 @@ function renderUpdate(info) {
     return;
   }
   if (info.hasUpdate) {
-    // 如实说明这次是哪个源给出的版本、另一个源为什么没参与 ——
-    // 用户排查「为什么检查更新很慢」时，这一行比任何日志都直接。
+    // State which source produced the version and why the other did not take part -
+    // for "why is the update check slow" this line beats any log.
     const src = (info.sources || []).map((x) => `${x.name} ${x.tag || ''}`.trim()).join(' / ');
     const bad = (info.unreachable || []).map((x) => x.name).join(', ');
     const stale = info.stale ? '(offline cache, may be outdated)' : '';
@@ -842,7 +842,7 @@ function renderUpdate(info) {
   }
 }
 
-/** .btn 自带 display:inline-flex，会盖掉 hidden 属性，所以这里直接改 display */
+/** .btn sets display:inline-flex, which overrides the hidden attribute, so change display directly */
 function showUpdateBtn(on) {
   const btn = $('btnDoUpdate');
   if (!btn) return;
@@ -918,7 +918,7 @@ function bindUpdate() {
     }
   });
 
-  // 打开设置时如果还没结果，就顺手查一次（放后台，不打扰）
+  // If there is no result yet when Settings opens, check once in the background
   runCheck(true).catch(() => {});
 }
 
@@ -934,9 +934,9 @@ function bindSettings() {
     refreshStatus();
   });
   $('setSystemImage').addEventListener('change', (e) => save({ runtime: { isoPath: e.target.value.trim() } }));
-  // 内存 / 核心：填了具体值就关掉「自动」，填 0 又回到自动。
-  // 旧代码只写 memoryMB，而 overridesFromSettings 只在 autoMemory=false 时才认它，
-  // 于是「手动填了内存」一直被忽略 —— 这是设置页最容易被当成“没用”的一项。
+  // Memory / cores: a concrete value turns "auto" off; 0 turns it back on.
+  // The old code wrote memoryMB only, but overridesFromSettings honors it only when autoMemory=false,
+  // so manual memory was ignored - the setting most often dismissed as "does nothing".
   $('setMemory').addEventListener('change', (e) => {
     const v = Number(e.target.value) || 0;
     save(v > 0 ? { engine: { memoryMB: v, autoMemory: false } } : { engine: { memoryMB: 0, autoMemory: true } });
@@ -947,7 +947,7 @@ function bindSettings() {
   });
   if ($('setResourceMode')) {
     $('setResourceMode').addEventListener('change', async (e) => {
-      // 资源策略会连带改 liteMode / priorityMode / renderSize（主进程里翻译）
+      // The resource policy also changes liteMode / priorityMode / renderSize (mapped in the main process)
       state.settings = await api.setSettings({ engine: { resourceMode: e.target.value } });
       fillSettings(state.settings);
       toast({ title: 'Resource policy changed', body: 'Takes effect the next time you open an app', type: 'ok' });
@@ -1019,7 +1019,7 @@ function bindSettings() {
   $('setPriorityMode').addEventListener('change', (e) => save({ engine: { priorityMode: e.target.value } }));
   const savePointer = async (patch) => {
     await save({ engine: patch });
-    // 立刻按当前窗口焦点重装/卸载钩子，不用等下次切窗口
+    // Reinstall/remove the hook for the current window focus now, without waiting for the next switch
     api.refreshPointerMapping().catch(() => {});
   };
   $('setMouseRightBack').addEventListener('change', (e) => savePointer({ mouseRightBack: e.target.checked }));
@@ -1027,7 +1027,7 @@ function bindSettings() {
   $('setMouseSideButtons').addEventListener('change', (e) => savePointer({ mouseSideButtons: e.target.checked }));
   $('setDeepTrim').addEventListener('change', async (e) => {
     await save({ engine: { deepTrim: e.target.checked } });
-    // 关掉深度裁剪必须把之前 pm disable-user 的包恢复回来，否则影响是持久的
+    // Turning deep trim off must re-enable packages disabled via pm disable-user; otherwise the effect persists
     if (!e.target.checked) {
       api.restoreSystemApps().catch(() => {});
       toast({ title: 'System components restored', body: 'Deep trim off; background packages are being restored', type: 'info' });
@@ -1101,7 +1101,7 @@ function bindSettings() {
     }
   });
 
-  // 重置安卓数据：二级确认（先确认意图，再确认不可撤销），清完刷新占用统计
+  // Reset Android data: two-step confirm (intent, then irreversibility), refresh usage after clearing
   $('btnResetData').addEventListener('click', async () => {
     const btn = $('btnResetData');
     btn.disabled = true;
@@ -1148,9 +1148,9 @@ function bindSettings() {
     }
   });
 
-  // 修复网络：安卓里联网页面一直黑屏（红果点「同意并继续」后整屏黑）时用。
-  // 根因是虚拟机 /data 里的 Wi-Fi 配置坏了，wlan0 没起来、没有默认路由。
-  // Play Store 镜像不允许 root，只能整体重置 /data；应用清单保留，点开时会自动重装。
+  // Fix network: for pages that stay black inside Android (full black after tapping Agree and continue).
+  // Root cause is a broken Wi-Fi config in the VM's /data: wlan0 never comes up and there is no default route.
+  // Play Store images forbid root, so /data is reset wholesale; the app list is kept and reinstalls on open.
   $('btnRepairNetwork').addEventListener('click', async () => {
     const btn = $('btnRepairNetwork');
     btn.disabled = true;
@@ -1190,7 +1190,7 @@ function bindSettings() {
     }
   });
 
-  // 清理旧版本残留：扫描旧程序目录 / 失效卸载项 / 更新临时文件，确认后一次性清掉。
+  // Clean old-version leftovers: old program dirs / dead uninstall entries / update temp files, cleared on confirm.
   $('btnLeftovers').addEventListener('click', async () => {
     const btn = $('btnLeftovers');
     btn.disabled = true;
@@ -1241,7 +1241,7 @@ function bindSettings() {
 
   $('btnOpenShared').addEventListener('click', () => api.openSharedDir());
 
-  // 重建快捷方式：桌面图标被误删 / 被安全软件拦掉时的兜底入口
+  // Rebuild shortcuts: recovery entry when desktop icons were deleted / blocked by security software
   $('btnRebuildShortcuts').addEventListener('click', async () => {
     const btn = $('btnRebuildShortcuts');
     btn.disabled = true;
@@ -1256,7 +1256,7 @@ function bindSettings() {
     }
   });
 
-  // 共享目录：先浏览选目录，再「保存并迁移」把旧文件一次性搬到新目录
+  // Shared directory: browse to pick a directory, then "save and migrate" moves old files in one go
   $('btnBrowseShared').addEventListener('click', async () => {
     const picked = await api.openDir();
     if (!picked) return;
@@ -1278,7 +1278,7 @@ function bindSettings() {
     }
   });
 
-  // 一键卸载 ApkStart 本体（取消 .apk 关联 + 启动卸载程序；便携版手动删除）
+  // One-click uninstall of ApkStart itself (drop .apk association + run the uninstaller; portable = manual delete)
   $('btnUninstall').addEventListener('click', async () => {
     const ok = window.confirm('Uninstall ApkStart?\n\nThis removes the .apk association and the program. It cannot be undone.');
     if (!ok) return;
@@ -1302,7 +1302,7 @@ function bindSettings() {
     toast({ title: 'Uninstalling…', body: 'The uninstaller started; ApkStart will now exit', type: 'ok', sticky: true });
   });
 
-  // ARM 兼容镜像下载（带进度 toast）
+  // ARM-compatible image download (with progress toast)
   $('btnInstallPlay').addEventListener('click', async () => {
     const btn = $('btnInstallPlay');
     btn.disabled = true;
@@ -1332,7 +1332,7 @@ function bindSettings() {
     }
   });
 
-  // 兼容镜像状态显示
+  // Compatible image status display
   (async () => {
     const env = ((state.status = await api.runtimeStatus()).env) || {};
     const s = state.settings;
@@ -1358,7 +1358,7 @@ function bindSettings() {
     toast({ title: 'Data folder updated', body: 'Restart ApkStart to apply (old data is not moved automatically)', type: 'ok', sticky: true });
   });
 
-  // 安卓数据目录（AVD + 快照）：真正吃盘的那块，单独指到别的盘
+  // Android data directory (AVD + snapshots): the real disk eater, can point to another drive
   if ($('btnBrowseAvdDir')) {
     $('btnBrowseAvdDir').addEventListener('click', async () => {
       const picked = await api.openDir();
@@ -1425,10 +1425,10 @@ function bindSettings() {
   });
 }
 
-/* ---------------- 事件绑定 ---------------- */
+/* ---------------- Event wiring ---------------- */
 
 function bindEvents() {
-  // 链接统一走系统浏览器
+  // Links go through the system browser
   document.addEventListener('click', (e) => {
     const a = e.target.closest && e.target.closest('a[href^="http"]');
     if (!a) return;
@@ -1437,7 +1437,7 @@ function bindEvents() {
   });
 
   $('btnSettings').addEventListener('click', openSettings);
-  // 状态标签也当入口：点「需要部署 / 引导中 / Android 14」直接进设置的运行时面板
+  // The status chip is also an entry: clicking "needs setup / booting / Android 14" opens the runtime panel
   $('engineTag').addEventListener('click', () => showSetup(true));
   $('btnCloseSettings').addEventListener('click', closeSettings);
   $('btnDoneSettings').addEventListener('click', closeSettings);
@@ -1445,7 +1445,7 @@ function bindEvents() {
     if (e.target === $('settingsMask')) closeSettings();
   });
 
-  // 运行时部署：入口已收进设置，这里只处理面板内的按钮
+  // Runtime deployment: the entry moved into Settings; only panel buttons are handled here
   $('btnDeployAll').addEventListener('click', deployAll);
   $('btnMarkInstalled').addEventListener('click', markInstalled);
   $('btnGuideClose').addEventListener('click', () => { $('setupGuide').hidden = true; });
@@ -1457,7 +1457,7 @@ function bindEvents() {
     }
   });
 
-  // 状态条上的自检计数：点开就是设置里的运行时面板
+  // Self-check counter on the status bar: opens the Settings runtime panel
   $('envChip').addEventListener('click', () => {
     openSettings().then(() => {
       const box = $('envCheck');
@@ -1510,7 +1510,7 @@ function bindEvents() {
   };
   $('btnInstall').addEventListener('click', pick);
   $('btnInstall2').addEventListener('click', pick);
-  // 共享目录入口移到设置里：同步 + 打开都在「文件互通」组内
+  // Shared-directory entry moved into Settings: sync + open live in the "file sharing" group
   const btnSync = $('btnSyncShared');
   if (btnSync) btnSync.addEventListener('click', async () => {
     btnSync.disabled = true;
@@ -1566,7 +1566,7 @@ function bindEvents() {
     }
   });
 
-  // 拖放安装
+  // Drag-and-drop install
   let dragDepth = 0;
   window.addEventListener('dragenter', (e) => {
     e.preventDefault();
@@ -1591,9 +1591,9 @@ function bindEvents() {
     else toast({ title: 'Only .apk files can be dropped', type: 'error' });
   });
 
-  // 主进程事件
+  // Main-process events
   api.on('install:error', (p) => {
-    // 报错了就别再让「正在安装…」那条一直转圈（可能来自双击 APK 的另一条链路）
+    // On error stop the "installing..." spinner (may come from the double-click APK path)
     if (installToast) { try { installToast.dismiss(); } catch (_) { /* ignore */ } installToast = null; }
     const name = p && p.file ? String(p.file).split(/[\\/]/).pop() : '';
     toast({
@@ -1613,14 +1613,14 @@ function bindEvents() {
   api.on('update:state', (info) => {
     if (!info) return;
     renderUpdate(info);
-    // 启动 8 秒后才拿到更新信息：欢迎卡若还开着，把「发现新版本」这条补进去
+    // Update info arrives 8s after launch: if the welcome card is open, append the "new version" line
     const wm = $('welcomeMask');
     if (wm && !wm.hidden) renderWelcomeTips();
   });
   api.on('update:progress', (p) => renderUpdateProgress(p));
 }
 
-/* ---------------- 启动 ---------------- */
+/* ---------------- Startup ---------------- */
 
 async function init() {
   bindEvents();
@@ -1639,7 +1639,7 @@ async function init() {
   setInterval(selfCheck, 60000);
 }
 
-/* ---------------- 启动欢迎卡 ---------------- */
+/* ---------------- Welcome card ---------------- */
 
 let startupInfo = null;
 
@@ -1665,11 +1665,11 @@ function bindWelcome() {
   window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !mask.hidden) close(); });
 }
 
-/** 决定要不要弹：开机自启必弹；手动打开则每天最多一次，且用户可永久关闭 */
+/** Decide whether to show: always on autostart; manual opens at most once a day; users can disable permanently */
 async function maybeShowWelcome() {
   const mask = $('welcomeMask');
   if (!mask) return;
-  // 冒烟截图时不要弹欢迎卡：否则每次自动截图都被它挡住主界面
+  // Never show the welcome card during smoke screenshots; it would block the main view every time
   try { if ((await api.startupInfo()).smoke) return; } catch (_) { /* ignore */ }
   try { startupInfo = await api.startupInfo(); } catch (_) { startupInfo = null; }
   const cfg = (state.settings && state.settings.welcome) || {};
@@ -1701,7 +1701,7 @@ async function maybeShowWelcome() {
   api.setSettings({ welcome: { lastDate: today } }).catch(() => {});
 }
 
-/** 提示区单独渲染：启动 8 秒后才拿到更新信息，那时卡片可能还开着，需要补一次 */
+/** Render the notice area separately: update info arrives 8s after launch and the card may still be open */
 function renderWelcomeTips() {
   const box = $('welcomeTips');
   if (!box) return;
@@ -1721,29 +1721,29 @@ function renderWelcomeTips() {
     .join('');
 }
 
-/* ---------------- 环境自检 ---------------- */
+/* ---------------- Environment self-check ---------------- */
 
 let envBusy = false;
 
-/** 拉取 doctor:selfCheck：把问题渲染到设置里的自检面板，并在状态条上留一个计数 */
+/** Fetch doctor:selfCheck: render issues in the Settings self-check panel and a status-bar count */
 async function selfCheck() {
   if (envBusy) return;
   envBusy = true;
   try {
     const r = await api.selfCheck().catch(() => null);
     if (r) renderEnvCheck(r);
-  } catch (_) { /* 自检失败不阻断主流程 */ }
+  } catch (_) { /* self-check failure does not block the main flow */ }
   finally { envBusy = false; }
 }
 
 function renderEnvCheck(r) {
   const box = $('envCheck');
   if (!box) return;
-  // 「组件缺失」在同一个面板的一键完成里已经覆盖，不再重复列出
+  // "Missing components" is covered by one-click setup in the same panel; do not list it twice
   const needDeploy = !!(state.status && state.status.needsSetup);
   const issues = (r.issues || []).filter((i) => !(needDeploy && i.fix === 'deploy'));
 
-  // 主界面不再放横幅：只在底部状态条上留一个可点的计数，点开就是设置里的自检面板
+  // No more banners: only a clickable count on the status bar, opening the Settings self-check panel
   const chip = $('envChip');
   if (chip) {
     const errs = issues.filter((i) => i.severity === 'error').length;
@@ -1827,7 +1827,7 @@ async function fixIssue(issue) {
       break;
     }
     case 'disk': {
-      // 主进程会弹出原生确认框（含可释放空间预览），这里不再重复 confirm
+      // The main process shows a native confirm (with reclaimable space preview); no second confirm here
       const r = await api.runtimeCleanup({ apply: true }).catch(() => null);
       if (!r) { toast({ title: 'Cleanup failed', body: 'Please try again', type: 'error' }); break; }
       if (r.cancelled) break;
@@ -1852,7 +1852,7 @@ async function fixIssue(issue) {
     default:
       toast({ title: 'Automatic fix not supported yet', body: issue.hint || '', type: 'info' });
   }
-  // 修复后重新自检，刷新横幅与状态
+  // Re-run the self-check after a fix and refresh the banner and status
   setTimeout(selfCheck, 600);
   setTimeout(refreshStatus, 600);
 }

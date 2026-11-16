@@ -1,8 +1,8 @@
 'use strict';
 /**
- * 安卓系统设置：不需要进安卓桌面，也不用装第三方工具，
- * 直接通过 adb 把常用的系统开关做成 ApkStart 设置页里的按钮。
- * 所有命令都是官方 shell 接口，不依赖 root。
+ * Android system settings: no need to enter the Android desktop or install third-party tools;
+ * common system switches become buttons on the ApkStart settings page, driven straight through adb.
+ * Every command uses the official shell interface and requires no root.
  */
 const ACTIONS = {
   settings: 'android.settings.SETTINGS',
@@ -33,7 +33,7 @@ class AndroidSettings {
     return c.shell(script, { timeout: 20000 });
   }
 
-  /** 读一批当前状态，供设置页显示 */
+  /** Read a batch of current states for the settings page to display */
   async status() {
     const out = await this._sh([
       'echo "wifi=$(settings get global wifi_on)"',
@@ -82,7 +82,7 @@ class AndroidSettings {
     return { ok: true, volume: v };
   }
 
-  /** 关闭系统动画 = 明显的「变快」体感，且几乎不损失功能 */
+  /** Turning system animations off is a clear "feels faster" win and costs almost no functionality */
   async setAnimations(on) {
     const v = on ? '1' : '0';
     await this._sh([
@@ -99,7 +99,7 @@ class AndroidSettings {
     return { ok: true, fontScale: Number(v) };
   }
 
-  /** 显示大小：改 dpi，越大内容越大（相当于系统「显示大小」档位） */
+  /** Display size: change the dpi; larger means bigger content (the system "display size" level) */
   async setDensity(dpi) {
     const v = Math.max(120, Math.min(640, Math.round(Number(dpi) || 0)));
     if (!v) return { ok: false };
@@ -107,7 +107,7 @@ class AndroidSettings {
     return { ok: true, density: v };
   }
 
-  /** 一键整理：关动画 + 关遥测类服务 + 电池白名单，让应用更跟手 */
+  /** One-click tune-up: animations off + telemetry services off + battery allowlist, for snappier apps */
   async tune({ pkg } = {}) {
     const cmds = [
       'settings put global window_animation_scale 0',
@@ -127,7 +127,7 @@ class AndroidSettings {
     return { ok: true };
   }
 
-  /** 应用运行时权限一览 + 授权 */
+  /** Overview of the app's runtime permissions plus granting them */
   async permissions(pkg) {
     const c = await this.client();
     const dump = await c.shell(`dumpsys package ${pkg}`, { timeout: 20000 });

@@ -1,16 +1,16 @@
 'use strict';
 /**
- * 清理旧版本残留。
+ * Clean up leftovers from older versions.
  *
- * 用户升级 ApkStart 常出现「装过好几个版本、卸载不干净」：便携版每换一次版本就多一个
- * ApkStart-vX.Y.Z-win64-portable 目录；NSIS 安装版升级后可能留下指向已删除目录的
- * 卸载项；更新过程还会在数据目录里留下一堆临时包。
+ * Upgrades often leave debris ("several versions installed, never uninstalled cleanly"): every portable version switch adds another
+ * ApkStart-vX.Y.Z-win64-portable directory; an upgraded NSIS install may leave uninstall entries pointing at deleted directories;
+ * and the update process leaves temporary packages in the data directory.
  *
- * 这里只做**可证明安全**的清理：
- *   - 只认「目录里确实有 ApkStart.exe」的旧版本目录，且绝不碰当前正在运行的那个；
- *   - 只删除「InstallLocation 已经不存在」的注册表卸载项（那个本来就已经是死条目）；
- *   - 只删自己更新缓存里的临时文件与指向不存在目标的开始菜单/桌面快捷方式。
- * 任何一步拿不准就跳过，并把原因如实返回给界面。
+ * This only performs cleanup that is **provably safe**:
+ *   - only old-version directories that really contain ApkStart.exe, and never the one currently running;
+ *   - only registry uninstall entries whose InstallLocation no longer exists (already dead entries anyway);
+ *   - only temp files in our own update cache and Start-menu/desktop shortcuts pointing at missing targets.
+ * Anything uncertain is skipped, and the reason is returned to the UI honestly.
  */
 const fs = require('fs');
 const path = require('path');
@@ -29,7 +29,7 @@ function dirSize(p) {
       try {
         if (e.isDirectory()) walk(f);
         else n += fs.statSync(f).size;
-      } catch (_) { /* 占用/无权限，跳过 */ }
+      } catch (_) { /* busy or access denied, skip */ }
     }
   };
   walk(p);
@@ -41,14 +41,14 @@ function norm(p) {
 }
 
 /**
- * 在若干「可能放程序的」目录里找旧版本目录。
+ * Find old-version directories in the places programs may live.
  *
- * 以前只扫当前 exe 的父目录 + LOCALAPPDATA\Programs + ProgramFiles，结果用户把
- * 便携版解压到别的地方（E:\下载、桌面、某个项目目录）就永远扫不到 —— 这正是
- * 「其他文件夹里的旧版本清不掉」的原因。现在多路发现：
- *   - 常见安装位置；
- *   - 各磁盘根目录下的浅层（很多便携版直接丢在 D:\ApkStart-…）；
- *   - 桌面 / 开始菜单里现存快捷方式指向的真实 exe 所在目录（最准，用户装过就一定有）。
+ * It used to scan only the current exe's parent + LOCALAPPDATA\Programs + ProgramFiles, so users who unzipped the
+ * portable build elsewhere (E:\Downloads, the desktop, some project folder) were never scanned - that was exactly
+ * why "old versions in other folders cannot be cleaned". Discovery now uses several routes:
+ *   - common install locations;
+ *   - shallow levels under each drive root (many portable copies are dropped straight into D:\ApkStart-...);
+ *   - the directory of the real exe behind existing desktop / Start-menu shortcuts (most accurate: if the user ever installed it, one exists).
  */
 function candidateRoots(installDir) {
   const roots = new Set();
@@ -73,9 +73,9 @@ function candidateRoots(installDir) {
 }
 
 /**
- * 从快捷方式（.lnk / .desktop）反查 ApkStart.exe 的真实所在目录。
- * 这是最可靠的发现手段：只要用户曾经创建过桌面图标或开始菜单项，目标路径就在里面，
- * 无论它被放在哪个盘、哪个深层文件夹。
+ * Resolve the real directory of ApkStart.exe from shortcuts (.lnk / .desktop).
+ * This is the most reliable discovery method: if a desktop icon or Start-menu entry was ever created, the target path is inside it,
+ * no matter which drive or deep folder it lives in.
  */
 function rootsFromShortcuts() {
   const dirs = new Set();
@@ -102,7 +102,7 @@ function rootsFromShortcuts() {
             if (exePath && /[\\/]ApkStart(\.exe)?$/i.test(exePath)) dirs.add(path.dirname(exePath));
           }
         } else {
-          // .lnk 是二进制，但目标路径以可读形式内嵌，直接扫字节里的 ApkStart*.exe
+          // .lnk is binary, but the target path is embedded readably; scan the bytes for ApkStart*.exe
           const buf = fs.readFileSync(full);
           const s = buf.toString('latin1');
           const re = /[A-Za-z]:\\[^\x00\x01-\x1f]*?ApkStart(?:-[^\x00\x01-\x1f]*)?[\\/]?ApkStart\.exe|[A-Za-z]:\\[^\x00\x01-\x1f]*?ApkStart\.exe/gi;
@@ -111,13 +111,13 @@ function rootsFromShortcuts() {
             dirs.add(path.dirname(mm[0].replace(/\x00.*$/, '')));
           }
         }
-      } catch (_) { /* 读不动就跳过 */ }
+      } catch (_) { /* skip when it cannot be read */ }
     }
   }
   return [...dirs];
 }
 
-/** 旧版本程序目录：形如 ApkStart*，且里面有 ApkStart.exe，且不是当前安装目录 */
+/** Old program directory: named ApkStart*, containing ApkStart.exe, and not the current install directory */
 function scanDirs(installDir) {
   const out = [];
   const seen = new Set();
@@ -127,7 +127,7 @@ function scanDirs(installDir) {
     if (seen.has(key)) return;
     seen.add(key);
     if (key === cur) return;
-    // 必须是「真的是 ApkStart」的目录，避免误删同名文件夹
+    // It must really be an ApkStart directory, so an unrelated folder of the same name is not deleted
     if (!fs.existsSync(path.join(full, EXE))) return;
     out.push({
       kind: 'dir',
@@ -145,10 +145,10 @@ function scanDirs(installDir) {
       consider(path.join(root, e.name));
     }
   }
-  // 快捷方式反查到的目录：本身可能就是旧版本目录，或其父/子目录是
+  // Directories resolved from shortcuts: may be the old directory itself, or its parent/child
   for (const d of rootsFromShortcuts()) {
     if (/^ApkStart/i.test(path.basename(d))) consider(d);
-    // 也看看它的同级（dist 下往往并排好几个版本目录）
+    // Also look at siblings (dist often holds several version directories side by side)
     const parent = path.dirname(d);
     let sib = [];
     try { sib = fs.readdirSync(parent, { withFileTypes: true }); } catch (_) { continue; }
@@ -159,7 +159,7 @@ function scanDirs(installDir) {
   return out;
 }
 
-/** 注册表里指向已不存在目录的卸载项 */
+/** Registry uninstall entries pointing at directories that no longer exist */
 function scanRegistry() {
   const out = [];
   const roots = [
@@ -173,7 +173,7 @@ function scanRegistry() {
       text = execFileSync('reg', ['query', root, '/s', '/f', 'ApkStart', '/t', 'REG_SZ'],
         { encoding: 'utf8', windowsHide: true, timeout: 15000, maxBuffer: 4 * 1024 * 1024 });
     } catch (_) { continue; }
-    // reg query 输出是分块的「键 → 值」，这里按块切
+    // reg query output comes in "key -> value" blocks, so split by block
     const blocks = String(text).split(/\r?\n\r?\n/);
     for (const b of blocks) {
       const key = (/^(HKEY_[^\r\n]+)$/m.exec(b) || [])[1];
@@ -185,7 +185,7 @@ function scanRegistry() {
       const install = (loc || '').trim().replace(/^"|"$/g, '');
       const uninsPath = (unins || '').trim().replace(/^"|"$/g, '');
       const installMissing = install ? !fs.existsSync(install) : false;
-      // 只处理「明明已经没装、却还挂在应用列表里」的死条目
+      // Only handle dead entries that are "not installed, yet still listed in Apps"
       const deadUninstaller = uninsPath && !fs.existsSync(uninsPath.split('"')[0]);
       if (!installMissing && !deadUninstaller) continue;
       out.push({
@@ -199,7 +199,7 @@ function scanRegistry() {
   return out;
 }
 
-/** 更新缓存 / 临时包 */
+/** Update cache / temp packages */
 function scanTemp(dataDir) {
   const out = [];
   const dirs = [path.join(dataDir, 'update'), os.tmpdir()];
@@ -220,8 +220,8 @@ function scanTemp(dataDir) {
   return out;
 }
 
-/** 旧/废弃的快速启动快照：default_boot 是早期版本留下的（一份 ram.img 约 3GB），
- *  *.stale-* 是「删不掉就改名」的残留。当前快照名是 apkstart，绝不碰。 */
+/** Old/deprecated quick-boot snapshots: default_boot came from early versions (one ram.img is about 3GB),
+ *  *.stale-* are leftovers from "rename when delete fails". The current snapshot is named apkstart and is never touched. */
 function scanSnapshots(avdHome) {
   const out = [];
   if (!avdHome) return out;
@@ -230,7 +230,7 @@ function scanSnapshots(avdHome) {
   try { list = fs.readdirSync(snapDir, { withFileTypes: true }); } catch (_) { return out; }
   for (const e of list) {
     if (!e.isDirectory()) continue;
-    if (e.name === 'apkstart') continue;   // 当前在用的快照
+    if (e.name === 'apkstart') continue;   // the snapshot currently in use
     const full = path.join(snapDir, e.name);
     out.push({
       kind: 'dir',
@@ -268,7 +268,7 @@ function clean(items, { installDir }) {
   for (const it of items || []) {
     try {
       if (it.kind === 'dir') {
-        // 双保险：绝不删当前正在运行的目录
+        // Double safety: never delete the directory currently running
         if (norm(it.path) === cur) { failed.push({ path: it.path, reason: 'This is the version currently running' }); continue; }
         if (!fs.existsSync(path.join(it.path, EXE))) { failed.push({ path: it.path, reason: 'Nothing in the folder ' + EXE }); continue; }
         if (rm(it.path)) { freed += it.size || 0; removed.push(it.path); }

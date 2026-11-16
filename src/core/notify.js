@@ -1,19 +1,19 @@
 'use strict';
 /**
- * 安卓通知 → Windows 原生通知。
+ * Android notifications -> native Windows notifications.
  *
- * 模拟器没有把通知接到 Windows 上，这里按 2.5 秒轮询 `dumpsys notification`（只读、低开销），
- * 解析出「新出现的通知」再用 Electron 的 Notification 走系统通知中心 / 操作中心。
- * 点通知直接回到对应的应用窗口。
+ * The emulator does not bridge notifications to Windows, so this polls `dumpsys notification` every 2.5 s (read-only, low cost),
+ * parses out newly appeared notifications and shows them through Electron's Notification in the system Action Center.
+ * Clicking a notification returns straight to the matching app window.
  */
 const { Notification, nativeImage } = require('electron');
 
 const POLL_MS = 2500;
 
 /**
- * 系统自带的常驻通知不要往 Windows 上搬。
- * 「已检测到虚拟 SD 卡」「配置物理键盘」「Google Play 保护机制已开启」这类东西
- * 每天都会冒一遍，转成 Windows 通知就是纯骚扰。
+ * Do not forward the system's own persistent notifications to Windows.
+ * Things like "virtual SD card detected", "configure physical keyboard" or "Google Play Protect is on"
+ * pop up every day; turning them into Windows notifications is pure noise.
  */
 const SYSTEM_PKGS = [
   'android',
@@ -97,7 +97,7 @@ class NotifyBridge {
       const dump = await client.shell('dumpsys notification --noredact', { timeout: 12000 });
       const list = parseRecords(dump);
       if (!this.primed) {
-        // 第一次只做基线，避免启动瞬间把历史通知全弹一遍
+        // The first pass only builds a baseline, so history is not replayed as a burst at startup
         for (const n of list) this.seen.add(`${n.pkg}|${n.key}|${n.title}`);
         this.primed = true;
         return;
@@ -109,10 +109,10 @@ class NotifyBridge {
         this.seen.add(id);
         fresh.push(n);
       }
-      // 防内存增长：只在最近 500 条里做去重
+      // Bound memory: dedupe only against the most recent 500 entries
       if (this.seen.size > 500) this.seen = new Set([...this.seen].slice(-300));
       for (const n of fresh) this._show(n);
-    } catch (_) { /* 运行时未就绪时忽略 */ }
+    } catch (_) { /* ignore while the runtime is not ready */ }
   }
 
   _show(n) {
@@ -129,7 +129,7 @@ class NotifyBridge {
       });
       note.on('click', () => { if (this.onOpen) this.onOpen(n.pkg); });
       note.show();
-    } catch (_) { /* 通知失败不影响应用 */ }
+    } catch (_) { /* a failed notification must not affect the app */ }
   }
 }
 

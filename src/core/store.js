@@ -1,7 +1,7 @@
 'use strict';
 /**
- * 本地持久化：应用清单 + 设置
- * 数据目录：%APPDATA%\apkstart
+ * Local persistence: app list + settings
+ * Data directory: %APPDATA%\apkstart
  */
 const fs = require('fs');
 const path = require('path');
@@ -17,109 +17,109 @@ const DEFAULT_SETTINGS = {
   adbPath: '',
   device: '127.0.0.1:5555',
   engine: {
-    mode: 'builtin',         // builtin（自带运行时，默认） | attach（连接已有运行时，高级）
+    mode: 'builtin',         // builtin (bundled runtime, default) | attach (connect to an existing runtime, advanced)
     qemuPath: '',
     systemImage: '',
-    memoryMB: 0,             // 0 = 由 doctor 按机器内存自动决定
-    cores: 0,                // 0 = 自动
-    autoMemory: true,        // 零配置：自动推导内存/核心/磁盘/渲染参数
+    memoryMB: 0,             // 0 = decided by doctor from machine memory
+    cores: 0,                // 0 = auto
+    autoMemory: true,        // zero config: derive memory/cores/disk/render flags automatically
     idleShutdownMinutes: 15,
     startVisible: true,
-    // 必须带窗口：无头模式 SurfaceFlinger 不出 VSYNC，应用进程活着但屏幕上什么都没有。
-    // 带窗口的模拟器是原生 60fps + 原生鼠标键盘，ApkStart 只负责把它打扮成应用窗口。
+    // A window is mandatory: in headless mode SurfaceFlinger emits no VSYNC, so app processes live but the screen shows nothing.
+    // A windowed emulator gives native 60fps with native mouse and keyboard, and ApkStart only dresses it up as an app window.
     headless: false,
-    gpuMode: 'auto',         // auto = 按 emulator 版本自动挑后端并逐级降级
-    // 上次「拉起就崩」的渲染后端（格式 `<emulator版本>|<gpu>`）；auto 模式下下次把它排到最后，
-    // 免得每次开机都先白等 20 多秒再退到软件渲染。升级运行时会自动失效。
+    gpuMode: 'auto',         // auto = pick a backend per emulator version and degrade step by step
+    // The render backend that last "crashed right after launch" (format `<emulator version>|<gpu>`); in auto mode it ranks last next time,
+    // so every boot does not waste 20+ seconds before falling back to software rendering. Invalidated by a runtime upgrade.
     badGpu: '',
-    forceTcg: false,         // 保留给高级排障；正常路径已由 doctor 自动回退
-    audio: true,             // 安卓应用的声音（提示音/视频）。关闭可省一点 CPU
-    // ---- 轻量容器（默认全开省资源，用户可逐项关掉）----
-    liteMode: true,          // 收敛 vCPU 配额，避免 qemu 占满物理核拖慢 Windows
-    // 一句话策略：save（省资源）/ balanced（均衡）/ smooth（流畅，视频·游戏优先）。
-    // 界面上只暴露这一个选项，保存时自动翻译成 liteMode / priorityMode / renderSize，
-    // 底部仍然保留细项开关给高级用户。
+    forceTcg: false,         // kept for advanced troubleshooting; doctor already falls back on the normal path
+    audio: true,             // Android app sound (notification tones/video). Turning it off saves a little CPU
+    // ---- lightweight container (all on by default to save resources; each can be turned off) ----
+    liteMode: true,          // cap the vCPU quota so qemu does not saturate physical cores and slow Windows
+    // One-word policy: save (frugal) / balanced / smooth (video and games first).
+    // The UI exposes only this choice and translates it on save into liteMode / priorityMode / renderSize,
+    // while the fine-grained switches remain at the bottom for advanced users.
     resourceMode: 'balanced',
-    // 数据分区容量（GB）：应用、游戏缓存和它们的更新包都装在这里。
-    // 0 = 自动（按磁盘剩余给 6/8GB）。改大后在下次开安卓时**就地扩容**，不丢已装应用。
+    // Data partition size (GB): apps, game caches and their update packages all live here.
+    // 0 = auto (6/8GB depending on free disk). Raising it **grows in place** on the next Android start, losing no installed apps.
     dataPartitionGB: 0,
-    // 渲染分辨率：越低越流畅、越省电；auto = 按加速状态选 720x1280 / 540x960
+    // Render resolution: lower is smoother and more power-frugal; auto = 720x1280 / 540x960 by acceleration state
     renderSize: 'auto',
-    // 网络加速：给模拟器指定国内公共 DNS。安卓默认的 10.0.2.3 要走主机 DNS，
-    // VPN / 公司网 / 某些运营商下解析会拖到几百毫秒，视频类应用首屏会明显发卡。
+    // Network acceleration: give the emulator a public DNS. Android's default 10.0.2.3 forwards to the host DNS,
+    // which under a VPN / corporate network / some carriers takes hundreds of milliseconds and visibly hitches video apps' first screen.
     fastDns: true,
-    // 快照：quickboot 内存快照让二次启动只要几秒，代价是磁盘上多一份约 2~3GB 的
-    // ram.bin。磁盘紧张时可以关掉（只影响启动速度，不影响应用数据）。
+    // Snapshot: a quickboot memory snapshot makes the second start take seconds, at the cost of a ~2-3GB
+    // ram.bin on disk. It can be turned off when disk is tight (only start speed is affected, not app data).
     keepSnapshot: true,
-    // 日志上限（KB）：超过就滚动备份一份，避免长期使用把磁盘写满
+    // Log cap (KB): beyond it a backup is rotated in, so long-term use never fills the disk
     logLimitKB: 2048,
-    // 鼠标键位：左键由模拟器原生映射为「确认/点击」，无需开关。
-    // 右键返回与平滑滚轮需要低级钩子，但只在应用窗口前台时装，失焦即卸载。
-    mouseRightBack: true,    // 右键 = 安卓返回（拦下 Qt 默认的「右键也当点击」误触）
-    mouseWheelMode: 'smooth', // smooth = 合并后注入一次滑动 | native = 交给 Qt | off = 不处理
-    mouseSideButtons: false, // 侧键返回/前进：默认关闭，开启才多装一项映射
-    deepTrim: false,         // 深度裁剪系统后台包（Play 商店/向导等），默认不动系统
-    // balanced=让出前台 | performance=qemu Normal | game=qemu High + 低延迟输入
+    // Mouse bindings: the left button maps natively to "confirm/tap" in the emulator and needs no switch.
+    // Right-click back and smooth wheel need a low-level hook, installed only while an app window is in the foreground and removed on blur.
+    mouseRightBack: true,    // right button = Android back (intercepts Qt's default "right-click as tap" misfire)
+    mouseWheelMode: 'smooth', // smooth = coalesce into one injected swipe | native = leave it to Qt | off = untouched
+    mouseSideButtons: false, // side buttons back/forward: off by default; enabling adds one more mapping
+    deepTrim: false,         // deep-trim system background packages (Play Store/setup wizard etc.); the system is untouched by default
+    // balanced = yield to the foreground | performance = qemu Normal | game = qemu High + low-latency input
   priorityMode: 'balanced',
-    // 预热：启动 ApkStart 后在后台把安卓环境引导好，第一次点应用几乎不用等。
-    // 代价是常驻约 1GB 内存（和 WSA / 应用宝电脑版一样的取舍），可随时关掉。
+    // Prewarm: boot the Android environment in the background after ApkStart starts, so the first app tap barely waits.
+    // It costs about 1GB of resident memory (the same trade-off as WSA / Tencent's PC store) and can be turned off any time.
     prewarm: true,
   },
   runtime: {
-    dir: '',                 // 空 = %APPDATA%\apkstart\runtime
-    qemuUrl: '',             // 手动指定 QEMU 安装包地址
-    isoUrl: '',              // 手动指定系统镜像地址
-    isoPath: '',             // 系统镜像（ISO）路径
-    diskPath: '',            // 安装系统的虚拟磁盘
+    dir: '',                 // empty = %APPDATA%\apkstart\runtime
+    qemuUrl: '',             // manually set the QEMU installer URL
+    isoUrl: '',              // manually set the system image URL
+    isoPath: '',             // system image (ISO) path
+    diskPath: '',            // virtual disk the OS is installed to
     diskSizeGB: 24,
-    headless: false,         // 不显示虚拟机窗口（仅调试）
-    installMode: 'guided',   // guided（引导手动安装） | auto（实验性自动安装）
-    emulatorUrl: '',         // 手动指定 emulator 包地址（空 = 自动从 SDK 索引解析最新版）
-    sysimgUrl: '',           // 手动指定系统镜像包地址
-    compatImage: false,      // ARM 兼容模式：改用 Google Play 镜像（内置 native bridge，可装 ARM-only 应用）
-    deployFailedAt: 0,       // 上次自动部署失败的时间戳（0=无失败）。失败后 30 分钟内不再自动重下
-    // 轻量版的运行时整包：默认从本项目 GitHub Release 下载（与「软件更新」同源），
-    // 拿不到时自动退回 dl.google.com 分组件下载。可在这里换成自建镜像地址。
+    headless: false,         // hide the VM window (debugging only)
+    installMode: 'guided',   // guided (walk the user through a manual install) | auto (experimental automated install)
+    emulatorUrl: '',         // manually set the emulator package URL (empty = resolve the latest from the SDK index)
+    sysimgUrl: '',           // manually set the system image package URL
+    compatImage: false,      // ARM compatibility mode: use the Google Play image (built-in native bridge, installs ARM-only apps)
+    deployFailedAt: 0,       // timestamp of the last failed auto-setup (0 = none). No automatic retry for 30 minutes after a failure
+    // Slim-edition runtime bundle: downloaded from this project's GitHub Release by default (same source as "software update"),
+    // falling back to Google's per-component downloads when unavailable. Can be pointed at a self-hosted mirror here.
     preferGithubRuntime: true,
     runtimePackUrl: '',
-    // GitHub 加速镜像前缀（可选）。国内直连 GitHub Releases 经常只有几十 KB/s，
-    // 填成 https://ghfast.top/ 之类的镜像前缀即可把 downloads 请求转过去。
-    // 留空 = 直连（也会先用 8 线程分块试，能跑满带宽）。
+    // GitHub acceleration mirror prefix (optional). Direct GitHub Releases often run at tens of KB/s from mainland China,
+    // so a prefix such as https://ghfast.top/ routes download requests through a mirror.
+    // Empty = direct (still tried first with 8 parallel chunks, which saturate bandwidth).
     mirrorPrefix: '',
-    // 下载并发数：分块下载的连接数。默认 8，弱网/被限速时可调到 16。
+    // Download concurrency: connections for chunked downloads. 8 by default; 16 helps on weak or throttled links.
     downloadConnections: 8,
-    // 更新/下载的源选择。auto = 同时问 GitHub 与 Gitee、并对每个下载地址实测
-    // 128KB 速度，谁快用谁；也可以强制只走某一边（企业网络只放行一个域名时有用）。
+    // Update/download source choice. auto = query GitHub and Gitee together and measure every download URL's
+    // 128KB speed, using the fastest; a single side can also be forced (useful when a corporate network allows one domain).
     sourcePreference: 'auto',
-    // 自动尝试公共 GitHub 加速镜像（ghfast / gh-proxy）。关掉后只用直连 + 自定义前缀。
-    // 这两个是第三方服务，只是转发公开的 release 文件，不涉及账号信息。
+    // Automatically try public GitHub acceleration mirrors (ghfast / gh-proxy). Off means direct plus custom prefixes only.
+    // These are third-party services that only relay public release files and never touch account information.
     autoMirror: true,
-    // Gitee 的 releases 接口对公开仓库也要求 access_token（无 token 直接 404），
-    // 想用 Gitee 作为更新源就在这里填一个只读 token；留空则只用 GitHub + 镜像。
+    // Gitee's releases API demands an access_token even for public repositories (404 without one),
+    // so put a read-only token here to use Gitee as an update source; empty means GitHub + mirrors only.
     giteeToken: '',
   },
   sharedDir: path.join(os.homedir(), 'ApkStartShared'),
   deviceSharedDir: '/sdcard/ApkStartShared',
   autoConnect: true,
   createShortcutOnInstall: true,
-  createStartMenuShortcut: true, // 开始菜单快捷方式 = 让 Windows 搜索能搜到应用
-  shortcutDir: '',           // 空 = 桌面
-  freeform: false,           // 共享一个运行时窗口，不再用 Android freeform 小窗
-  hideAfterLaunch: false,    // 主进程必须常驻，否则一退出就把 Android 运行时杀掉了
+  createStartMenuShortcut: true, // Start menu shortcut = makes the app findable in Windows Search
+  shortcutDir: '',           // empty = desktop
+  freeform: false,           // share one runtime window instead of Android freeform small windows
+  hideAfterLaunch: false,    // the main process must stay resident, or exiting kills the Android runtime
   notifyOnInstall: true,
-  autoStart: true,           // 开机自启，默认开启，用户无需设置
-  autoDeploy: true,          // 首次运行自动完成全部部署，不再分 1~5 步
-  // 启动欢迎卡：lastDate 记录上次自动弹出的日期（手动打开时一天最多一次），
-  // disabled = 用户勾了「不再自动弹出」。
+  autoStart: true,           // launch at login, on by default with nothing to configure
+  autoDeploy: true,          // complete all deployment automatically on first run, no longer in 1-5 steps
+  // Startup welcome card: lastDate records the last auto-popup date (at most once a day on a manual open),
+  // and disabled = the user ticked "do not pop up automatically".
   welcome: { lastDate: '', disabled: false },
   display: {
-    mode: 'window',          // window（竖屏窗口，可自由拉伸） | fullscreen（自动适配屏幕）
-    portrait: '900x1600',    // 窗口模式的竖屏分辨率，可在设置里调大小
-    density: 0,              // 0 = 按分辨率自动推导
-    rememberBounds: true,    // 记住每个应用的窗口位置/大小
+    mode: 'window',          // window (portrait, freely resizable) | fullscreen (fit the screen automatically)
+    portrait: '900x1600',    // portrait resolution in window mode, resizable in settings
+    density: 0,              // 0 = derived from the resolution
+    rememberBounds: true,    // remember each app's window position/size
     autoFullscreenOnLaunch: false,
-    // 横屏 = 把 AVD 物理面板换成 1280x720 并重启（唯一能得到正立+铺满的方式）。
-    // 持久化在这里，重启 ApkStart 后仍按这个方向开机。
+    // Landscape = swap the AVD physical panel to 1280x720 and restart (the only way to get upright + filled).
+    // Persisted here, so ApkStart boots in this orientation after a restart.
     landscape: false,
   },
 };
@@ -133,9 +133,9 @@ function ensureDirs() {
 function readJson(file, fallback) {
   try {
     let text = fs.readFileSync(file, 'utf8');
-    // 去掉可能的 UTF-8 BOM。带 BOM 时 JSON.parse 会直接抛错，于是整个配置
-    // 静默回落到默认值 —— 用户会看到「设置全丢了」，却完全不知道为什么。
-    // 这个文件会被设置页、同步工具、甚至用户手工编辑，必须容忍 BOM。
+    // Strip a possible UTF-8 BOM. JSON.parse throws outright on a BOM, so the whole config
+    // silently falls back to defaults - users see "all my settings are gone" with no idea why.
+    // The file is touched by the settings page, sync tools and even hand edits, so a BOM must be tolerated.
     if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
     return JSON.parse(text);
   } catch (_) {
@@ -163,12 +163,12 @@ function deepMerge(base, patch) {
 }
 
 /**
- * 资源策略 → 具体开关。
- *   save     ：2 vCPU + 低优先级 + 540x960，老笔记本 / 挂机用；
- *   balanced ：vCPU 取物理核的一半（2~4）+ 让出前台 + 720x1280；
- *   smooth   ：不限制 vCPU + 与前台同优先级 + 720x1280，视频与游戏优先。
- * 分辨率先不动 1080p：quickboot 快照指纹与它绑定，改一次就要重冷启动，而 720p
- * 在手机比例的窗口里已经看不出区别，性能却差一档。
+ * Resource policy -> concrete switches.
+ *   save     : 2 vCPU + low priority + 540x960, for old laptops / always-on use;
+ *   balanced : vCPU at half the physical cores (2-4) + yield to the foreground + 720x1280;
+ *   smooth   : unlimited vCPU + foreground-equal priority + 720x1280, video and games first.
+ * Resolution stays below 1080p for now: the quickboot snapshot fingerprint binds to it, so a change forces a cold boot, and at 720p
+ * a phone-ratio window shows no visible difference while performance drops a tier.
  */
 function resourcePreset(mode) {
   switch (String(mode || '')) {
@@ -187,20 +187,20 @@ const store = {
 
   getSettings() {
     const s = deepMerge(DEFAULT_SETTINGS, readJson(SETTINGS_FILE, {}));
-    // 旧版本默认无头运行：应用进程能起来但屏幕上没有窗口，等效于「打不开」。
-    // 无条件迁移到带窗口模式，且不再允许通过旧配置把它关掉。
+    // Old versions ran headless by default: app processes started but no window appeared, equivalent to "cannot open".
+    // Migrate to windowed mode unconditionally, and never allow old config to turn it off again.
     s.engine.headless = false;
-    // 旧版本退出壳层时会杀掉整个 Android 运行时，导致桌面图标点开闪一下就没了。
+    // Old versions killed the whole Android runtime on shell exit, so a desktop icon tap flashed and vanished.
     s.hideAfterLaunch = false;
-    // 旧版本用 Android freeform 小窗，现在整个模拟器窗口就是应用窗口，
-    // 应用必须铺满这块屏幕，否则会出现「窗口里再套一个小窗」。
+    // Old versions used Android freeform small windows; now the whole emulator window is the app window,
+    // so the app must fill that screen or a window ends up nested inside a window.
     s.freeform = false;
     return s;
   },
 
   saveSettings(patch) {
     const next = deepMerge(this.getSettings(), patch);
-    // 只改了「资源策略」时，把它翻译成具体的三个开关，避免两套配置各说各话
+    // When only the "resource policy" changed, translate it into the three concrete switches so the two configs never disagree
     if (patch && patch.engine && patch.engine.resourceMode) {
       Object.assign(next.engine, resourcePreset(next.engine.resourceMode));
     }

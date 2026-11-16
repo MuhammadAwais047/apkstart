@@ -1,13 +1,13 @@
 'use strict';
 /**
- * 极简 ZIP 读取器（仅依赖 Node 内置 zlib）
- * 只解析中央目录，按需解压单个条目，避免大 APK 全量解压撑爆内存。
+ * Minimal ZIP reader (depends only on Node's built-in zlib)
+ * It parses only the central directory and inflates single entries on demand, so large APKs never blow up memory.
  *
- * 注意：本文件只做「读」，不做「写」。两处「大小」相关的不变量：
- *  - 单个 Buffer 有上限（Node 约 2GB），所以 GB 级条目一律走 ZipFile + pipeTo；
- *  - ZIP 的传统 EOCD 用 16/32 位存条目数与偏移，超过就进位成 0xffff/0xffffffff，
- *    真正的值在 Zip64 EOCD（0x06064b50）与 Zip64 扩展字段（id=0x0001）里。
- *    两条路径都必须识别，否则大镜像包会被「静默截断条目」或直接越界。
+ * Note: this file only reads, never writes. Two size-related invariants:
+ *  - a single Buffer has a cap (about 2GB in Node), so GB-sized entries always go through ZipFile + pipeTo;
+ *  - the classic ZIP EOCD stores entry counts and offsets in 16/32 bits, saturating to 0xffff/0xffffffff,
+ *    with the real values in the Zip64 EOCD (0x06064b50) and the Zip64 extra field (id=0x0001).
+ *    Both paths must be recognised, or large image packages silently truncate entries or read out of bounds.
  */
 const zlib = require('zlib');
 const fs = require('fs');
@@ -19,16 +19,16 @@ const ZIP64_EOCD_SIG = 0x06064b50;
 const ZIP64_LOC_SIG = 0x07064b50;
 const MAX32 = 0xffffffff;
 const MAX16 = 0xffff;
-// read() 单条目上限：超过就要求调用方走 pipeTo（流式），避免整块进内存
+// read() per-entry cap: above it the caller must use pipeTo (streaming) so nothing enters memory whole
 const MAX_READ = 256 * 1024 * 1024;
 
-/** 把 BigInt 偏移安全地转成 Number（ZIP 不可能大过 2^53 字节） */
+/** Safely convert a BigInt offset to Number (a ZIP cannot exceed 2^53 bytes) */
 function toNum(v) { return typeof v === 'bigint' ? Number(v) : v; }
 
 /**
- * 解析 Zip64 扩展字段（0x0001），补全中央目录里被置成 0xffffffff 的字段。
- * 字段顺序固定：未压缩大小、压缩大小、本地头偏移、起始磁盘号；只出现「被置位」的那些。
- * @param {Buffer} extra 中央目录项的扩展字段
+ * Parse the Zip64 extra field (0x0001) and fill in central-directory fields saturated to 0xffffffff.
+ * Field order is fixed: uncompressed size, compressed size, local header offset, starting disk number; only the saturated ones appear.
+ * @param {Buffer} extra the central-directory entry's extra field
  * @param {{uncompSize:number, compSize:number, localOffset:number}} fields
  */
 function applyZip64Extra(extra, fields) {
@@ -59,10 +59,10 @@ function applyZip64Extra(extra, fields) {
 }
 
 /**
- * 从 EOCD 位置解出条目数 / 中央目录大小 / 中央目录偏移，自动跟进 Zip64。
- * @param {Buffer} buf 包含 EOCD 的缓冲区
- * @param {number} eocd EOCD 在 buf 内的下标
- * @param {number} base buf[0] 对应的文件绝对偏移（ZipFile 的尾部窗口用）
+ * Extract entry count / central-directory size / central-directory offset from the EOCD, following Zip64 automatically.
+ * @param {Buffer} buf buffer containing the EOCD
+ * @param {number} eocd index of the EOCD within buf
+ * @param {number} base absolute file offset of buf[0] (for ZipFile's tail window)
  * @returns {{total:number, cdSize:number, cdOffset:number, eocdAbs:number}}
  */
 function readEndOfCentralDirectory(buf, eocd, base) {
@@ -74,7 +74,7 @@ function readEndOfCentralDirectory(buf, eocd, base) {
   const needsZip64 = total === MAX16 || cdSize === MAX32 || cdOffset === MAX32;
   if (!needsZip64) return { total, cdSize, cdOffset, eocdAbs };
 
-  // Zip64 EOCD locator 固定紧挨在 EOCD 前面 20 字节
+  // The Zip64 EOCD locator sits exactly 20 bytes before the EOCD
   const loc = eocd - 20;
   if (loc < 0) return { total, cdSize, cdOffset, eocdAbs };
   if (buf.readUInt32LE(loc) !== ZIP64_LOC_SIG) return { total, cdSize, cdOffset, eocdAbs };
@@ -158,15 +158,15 @@ class ZipArchive {
     throw new Error(`Unsupported compression method ${e.method}: ${name}`);
   }
 
-  /** 列出匹配某个前缀/正则的条目名 */
+  /** List entry names matching a prefix/regex */
   find(re) {
     return [...this.entries.keys()].filter((n) => re.test(n));
   }
 
   /**
-   * 流式解压单个条目到可写流。
-   * system.img 这类 GB 级条目无法整块 inflate 进内存（会撞上 Node 的 2GB 单 Buffer 上限），
-   * 必须边解压边落盘。
+   * Stream one entry into a writable stream.
+   * GB-sized entries such as system.img cannot be inflated whole (they hit Node's 2GB single-Buffer cap),
+   * so they must be written to disk as they are inflated.
    */
   pipeTo(name, dest) {
     const e = this.entries.get(name);
@@ -192,7 +192,7 @@ class ZipArchive {
       if (e.method !== 8) return done(new Error(`Unsupported compression method ${e.method}: ${name}`));
 
       const inflater = zlib.createInflateRaw();
-      // 分片喂入，避免一次性把 GB 数据塞进 zlib 缓冲区
+      // Feed in slices so GBs of data never land in the zlib buffer at once
       const SLICE = 1 << 20;
       let pos = 0;
       const pump = () => {
@@ -215,9 +215,9 @@ class ZipArchive {
 }
 
 /**
- * 文件版 ZIP 读取器：只把尾部中央目录读进内存，条目按需从 fd 流式读。
- * 用于 emulator / 系统镜像这类 GB 级安装包——旧版 fs.readFileSync 整包读会
- * 在低内存机器上直接 OOM，表现为「下载完了却装不上」。
+ * File-based ZIP reader: only the tail central directory enters memory; entries stream from the fd on demand.
+ * Used for GB-sized packages such as the emulator and system images - the old fs.readFileSync whole-file read
+ * OOMs outright on low-memory machines, showing up as "downloaded, but installation fails".
  */
 class ZipFile {
   constructor(filePath) {
@@ -239,7 +239,7 @@ class ZipFile {
     if (n > 0) {
       let got = 0;
       while (got < n) {
-        // readSync 可能短读（尤其大块），必须循环到读满
+        // readSync may short-read (especially large chunks), so loop until full
         const r = fs.readSync(this.fd, b, got, n - got, pos + got);
         if (r <= 0) break;
         got += r;
@@ -267,7 +267,7 @@ class ZipFile {
     let cd = tail;
     let cdBase = tailBase;
     if (cdOffset < tailBase || cdOffset + cdSize > eocdAbs) {
-      // 中央目录不在尾部缓冲里（超大注释 / 多分卷），按声明大小精确读一段
+      // Central directory not inside the tail window (huge comment / multi-volume): read exactly the declared size
       const len = Math.min(cdSize, 256 * 1024 * 1024);
       if (len <= 0) throw new Error('Invalid ZIP central directory offset');
       cd = this._readAt(cdOffset, len);
@@ -320,8 +320,8 @@ class ZipFile {
 
   read(name) {
     const { e, start } = this._range(name);
-    // read() 会把整个条目解到内存：给一个明确上限，避免未来某个调用点顺手
-    // 拿来读 GB 级镜像（那正是 issue #21 里「大包必炸」的形态）。
+    // read() inflates the whole entry into memory: enforce an explicit cap so no future call site casually
+    // reads a GB-sized image (exactly the "big package always explodes" shape from issue #21).
     if (e.compSize > MAX_READ) {
       throw new Error(`Entry too large (${(e.compSize / 1048576).toFixed(0)}MB); use pipeTo instead: ${name}`);
     }

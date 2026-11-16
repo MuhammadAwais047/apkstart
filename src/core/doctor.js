@@ -1,14 +1,14 @@
 'use strict';
 /**
- * 设备自适应 / 自动诊断（零配置底座）
+ * Device adaptation / auto-diagnostics (the zero-config foundation)
  *
- * 目标：不同机器上都不需要用户调任何参数。
- *  - chooseProfile()  根据物理内存、CPU、磁盘、加速状态、emulator 版本推导启动参数；
- *  - planVariants()   给出「启动失败后依次降级」的重试方案（GPU → 加速 → 内存 → 冷启动）；
- *  - diagnose()       把 emulator 的英文 stderr 翻译成可执行的修复建议；
- *  - shortPath()      处理中文/空格安装路径（emulator 的 QEMU 对非 ASCII 路径极其敏感）。
+ * Goal: no parameter tuning required on any machine.
+ *  - chooseProfile()  derives launch parameters from RAM, CPU, disk, acceleration state and emulator version;
+ *  - planVariants()   returns the step-down retry plan after a failed launch (GPU -> accel -> memory -> cold boot);
+ *  - diagnose()       turns emulator stderr into actionable fix suggestions;
+ *  - shortPath()      handles non-ASCII / spaced install paths (emulator's QEMU is very sensitive to them).
  *
- * 本模块是纯函数 + 只读探测，不写设置、不拉起 Android，方便单测。
+ * This module is pure functions + read-only probing: no settings writes, no Android launch, easy to unit test.
  */
 const os = require('os');
 const fs = require('fs');
@@ -22,7 +22,7 @@ const isAsciiPath = (p) => ASCII.test(String(p || ''));
 
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 
-/** 本机画像（毫秒级，只读） */
+/** Host profile (millisecond-level, read-only) */
 function hostInfo() {
   const totalMB = Math.round(os.totalmem() / 1048576);
   const freeMB = Math.round(os.freemem() / 1048576);
@@ -41,7 +41,7 @@ function hostInfo() {
   };
 }
 
-/** 目录所在盘可用空间（MB）；取不到返回 0 */
+/** Free space on the volume holding a directory (MB); returns 0 when unavailable */
 function freeDiskMB(dir) {
   try {
     let d = path.resolve(dir || '.');
@@ -59,35 +59,35 @@ function versionNumbers(v) {
 }
 
 /**
- * emulator 36.4.9 起把 swiftshader_indirect 标记为弃用，新增 -gpu software。
- * 37.x 上传 swiftshader_indirect 会出现 GL 初始化失败/直接退出（设备差异很大）。
- * 因此必须按版本挑候选，且每个候选都有退路。
+ * Since emulator 36.4.9 swiftshader_indirect is deprecated and -gpu software is the new name.
+ * On 37.x, swiftshader_indirect causes GL init failure / immediate exit (varies a lot by machine).
+ * Candidates must therefore be version-selected, each with a fallback.
  */
 function gpuCandidates(emulatorVersion) {
   const [major, minor, patch] = versionNumbers(emulatorVersion);
   const modern = major > 36 || (major === 36 && (minor > 4 || (minor === 4 && patch >= 9)));
   return modern
-    // 顺序即「自动模式的尝试优先级」：
-    // 1) host        —— 用真实显卡渲染，最省 CPU、最跟手；
-    // 2) swangle     —— ANGLE 跑在 SwiftShader 之上的软件渲染。比裸 software/swiftshader
-    //                  对 Android WebView 的合成层友好得多（红果/抖音这类「点同意后进主界面
-    //                  黑屏」就是裸软件渲染过不了 WebView 合成导致的），因此排在第二顺位；
-    // 3) software    —— 纯 SwiftShader 兜底，兼容性OK但 WebView 合成易黑屏，仅最后才用；
-    // 4) swiftshader —— 旧名兜底。
-    // 注意 safeGpu（关闭加速的 TCG 兜底）仍取 software，保证「慢但最兼容」。
+    // Order is the auto-mode priority:
+    // 1) host        - real GPU rendering, lowest CPU, most responsive;
+    // 2) swangle     - software rendering with ANGLE on top of SwiftShader; far friendlier
+    //                  to Android WebView compositing than raw software/swiftshader (apps that show
+    //                  a black screen after Agree fail exactly there), hence second place;
+    // 3) software    - pure SwiftShader fallback; compatible but WebView compositing often goes black, last resort;
+    // 4) swiftshader - legacy-name fallback.
+    // Note safeGpu (TCG fallback with acceleration off) still uses software: slow but most compatible.
     ? ['host', 'swangle', 'software', 'swiftshader']
     : ['host', 'swiftshader_indirect', 'swiftshader'];
 }
 
-/** Windows 8.3 短路径：中文用户名 / 中文安装目录时 emulator 会找不到文件 */
+/** Windows 8.3 short path: the emulator cannot find files under non-ASCII usernames / install dirs */
 /**
- * 屏幕规格。landscape=true 时给出真正的横屏面板（1280x720）。
+ * Screen spec. landscape=true yields a real landscape panel (1280x720).
  *
- * 为什么必须改面板尺寸而不是运行时 wm size：模拟器的 LCD 是「物理面板」，
- * Qt 按面板尺寸开窗口并把画面贴在左上角。运行时改 wm size 只会改 Android 的
- * 逻辑分辨率，物理面板仍是竖的 —— 结果就是画面躺倒 90°、只占左上角一条、
- * 四周大片黑边、点击坐标错位。只有把 hw.lcd.width/height 真的换成横屏并重启，
- * 才能得到「正立 + 铺满」的横屏。
+ * Why change the panel size instead of runtime wm size: the emulator LCD is a physical panel;
+ * Qt sizes the window from it and pastes the frame at the top-left. Runtime wm size only changes Android's
+ * logical resolution while the panel stays portrait - the image ends up rotated 90 degrees, occupying a strip
+ * with black borders and broken tap coordinates. Only switching hw.lcd.width/height and restarting
+ * yields an upright, filled landscape screen.
  */
 function lcdFor({ accelOk = true, crisp = true, landscape = false } = {}) {
   const base = accelOk && crisp ? { w: 720, h: 1280, dpi: 320 } : { w: 540, h: 960, dpi: 240 };
@@ -102,34 +102,34 @@ function shortPath(p) {
     });
     const line = String(out).split(/\r?\n/).map((s) => s.trim()).filter(Boolean).pop();
     if (line && isAsciiPath(line) && fs.existsSync(line)) return line;
-  } catch (_) { /* 8.3 被关闭时保持原路径 */ }
+  } catch (_) { /* keep the original path when 8.3 names are disabled */ }
   return p;
 }
 
 /**
- * 推导零配置启动参数。
- * 用户设置里若显式给了 engine.memoryMB / cores / gpuMode，则作为上限/覆盖，
- * 但不会再因为「没设置」而用 4G/4核 硬编码把小内存机器搞崩。
+ * Derive zero-config launch parameters.
+ * Explicit engine.memoryMB / cores / gpuMode settings act as caps/overrides, but an
+ * unset value no longer hard-codes 4 GB/4 cores and wrecks small machines.
  */
 /**
- * 「轻量容器」配额：只约束最影响主机手感的那一项 —— vCPU 数。
+ * "Light container" quota: constrain only what hurts host responsiveness most - vCPU count.
  *
- * 旧逻辑给 16 核机器分 4 核，qemu 的 4 个 vCPU 线程会长期占满物理核，
- * Windows 桌面、鼠标、浏览器只能抢剩下的时间片，表现就是「一打开就卡」。
- * 实际跑一个 Android App 2 个 vCPU 已经绰绰有余，多给只是拖慢主机。
+ * The old logic gave a 16-core machine 4 cores; qemu's 4 vCPU threads kept physical cores busy,
+ * leaving the desktop, mouse and browser to fight over the scraps - "it stutters as soon as it opens".
+ * Running one Android app on 2 vCPUs is plenty; extra vCPUs only slow the host.
  *
- * 内存、分辨率刻意不动：内存上限本来就是 2~3G，降分辨率还会让 quickboot
- * 快照指纹变化、每次切模式都要重新冷启动，得不偿失。
+ * Memory and resolution are deliberately untouched: the cap is already 2-3 GB, and lowering resolution
+ * changes the quickboot snapshot fingerprint, forcing a cold boot on every mode switch.
  *
- * 纯函数，settings 为 null 时返回 null（保持旧调用方/单测的行为不变）。
+ * Pure function; returns null when settings is null (keeps old callers/tests unchanged).
  */
 function liteProfile({ host = hostInfo(), engine = {} } = {}) {
   if (engine && engine.liteMode === false) return null;
   const cores = engine && engine.resourceMode === 'save'
     ? 2
-    // 老逻辑是 floor(核数/4) 再夹到 2~3 —— 8 核机器只给 2 个 vCPU，软件解码视频
-    // （红果/抖音这类）直接卡成幻灯片。改成「一半物理核、上限 4」：
-    // 8 核给 4、4 核给 2，桌面仍有富余核，视频也够用。
+    // The old logic used floor(cores/4) clamped to 2-3 - an 8-core machine got 2 vCPUs and software video decoding
+    // turned into a slideshow. Now: half the physical cores, capped at 4:
+    // 8 cores -> 4, 4 cores -> 2; the desktop keeps spare cores and video still works.
     : clamp(Math.floor((host.cores || 2) / 2), 2, 4);
   return { cores, priority: 'below' };
 }
@@ -139,16 +139,16 @@ function chooseProfile({
   port = 5554, adbPort = 5044, overrides = {}, settings = null,
 } = {}) {
   const accelOk = !!(accel && accel.ok);
-  // 3GB 足够 Android 14 与主流应用；再高只会放大内存占用和 quickboot 快照体积
+  // 3 GB suffices for Android 14 and mainstream apps; more only inflates RAM use and snapshot size
   let memoryMB = clamp(Math.floor((host.totalMB * 0.22) / 256) * 256, 2048, 3072);
-  // 「省资源」模式：刷视频/看小说这类轻负载用不到 3G，把上限压到 2G。
-  // 直接效果是 qemu 常驻内存少约 1GB、quickboot 快照也小 1GB（磁盘同步受益）。
-  // 只有用户没手动指定内存时才收敛，手动值永远优先。
+  // "Resource saver" mode: light loads like video/novel reading do not need 3 GB, so cap at 2 GB.
+  // Net effect: about 1 GB less resident qemu memory and a 1 GB smaller snapshot (disk sync benefits).
+  // Only applied when the user did not set memory manually; manual values always win.
   const rmode = settings && settings.engine && settings.engine.resourceMode;
   if (rmode === 'save' && !overrides.memoryMB) {
     memoryMB = clamp(memoryMB, 2048, 2048);
   }
-  // 物理可用内存不够时下调；Android 14 最低 2G，低于此只能靠 TCG 慢速跑
+  // Lower when physical free memory is short; Android 14 needs at least 2 GB, below that only slow TCG runs
   if (host.freeMB && host.freeMB < memoryMB + 1024) {
     memoryMB = Math.max(2048, Math.floor((host.freeMB * 0.5) / 256) * 256);
   }
@@ -156,14 +156,14 @@ function chooseProfile({
 
   let cores = clamp(Math.floor(host.cores / 2), 2, 4);
   if (overrides.cores) cores = clamp(Number(overrides.cores) || cores, 1, 8);
-  // 用户没手动指定核数时才由轻量模式收敛，手动值永远优先
+  // Lite mode only adjusts when cores are unset; manual values always win
   const lite = settings ? liteProfile({ host, engine: settings.engine || {} }) : null;
   if (lite && !overrides.cores) cores = Math.min(cores, lite.cores);
 
   const disk = diskMB || freeDiskMB(host.tmp);
-  // /data 容量：应用本体、游戏资源包和它们的「更新包」都占这里，4GB 太容易满
-  // （表现就是应用内更新时提示「磁盘空间不足」）。默认按磁盘余量给 6/8GB，
-  // 用户也可以直接在设置里指定（改大后下次开机就地扩容，不丢数据）。
+  // /data size: app bodies, game asset packs and their update packs live here; 4 GB fills up fast
+  // (shown as "not enough disk space" during in-app updates). Default 6/8 GB based on free disk,
+  // and users can also set it directly (growing takes effect in place on next boot, no data loss).
   const wantGB = Number((settings && settings.engine && settings.engine.dataPartitionGB) || 0);
   const autoDataMB = disk && disk < 12288 ? 4096 : 6144;
   const dataMB = wantGB > 0 ? clamp(Math.round(wantGB * 1024), 2048, 65536) : autoDataMB;
@@ -171,15 +171,15 @@ function chooseProfile({
   const gpus = gpuCandidates(emulatorVersion);
   const gpu = overrides.gpuMode && gpus.includes(overrides.gpuMode) ? overrides.gpuMode : gpus[0];
 
-  // 渲染分辨率：auto 时按加速状态选（软件模拟降到 540x960 保流畅）
-  // 横屏优先：横屏是由「物理面板尺寸」决定的，必须写进 AVD 并重启才生效，
-  // 所以这里先按 settings.display.landscape 定方向，再叠加 renderSize。
+  // Render resolution: auto picks by acceleration state (software emulation drops to 540x960 for smoothness)
+  // Landscape first: landscape is decided by the physical panel size, so it must go into the AVD and a restart,
+  // so orientation comes from settings.display.landscape first, then renderSize is applied.
   const wantLandscape = !!(settings && settings.display && settings.display.landscape);
   const wantLcd = String((settings && settings.engine && settings.engine.renderSize) || 'auto');
   const lcd = /^\d{3,4}x\d{3,4}$/.test(wantLcd)
     ? (() => {
       const [w0, h0] = wantLcd.split('x').map(Number);
-      // 用户显式分辨率若与当前方向不一致，按方向校正（横屏取长边作宽）
+      // If an explicit resolution does not match the orientation, correct it (landscape uses the long edge as width)
       const long = Math.max(w0, h0);
       const short = Math.min(w0, h0);
       const w = wantLandscape ? long : short;
@@ -202,7 +202,7 @@ function chooseProfile({
     adbPort,
     snapshot: true,
     lite: !!lite,
-    // 无加速的纯软件模拟在 Windows 上确实能起来，但 Android 14 冷启动可能 5-10 分钟
+    // Pure software emulation does start on Windows, but an Android 14 cold boot can take 5-10 minutes
     bootTimeoutMs: accelOk ? 240000 : 600000,
     emulatorVersion,
     host,
@@ -210,9 +210,9 @@ function chooseProfile({
 }
 
 /**
- * 把「高级参数」里的用户设置转成 overrides。
- * 0 / auto / 未设置一律视为「不覆盖」，仍然走自动推导；
- * 只有用户主动关掉自动内存并填了具体数值才生效。
+ * Convert user settings from "advanced parameters" into overrides.
+ * 0 / auto / unset all mean "no override" and still go through auto derivation;
+ * only an explicit memory value with auto disabled takes effect.
  */
 function overridesFromSettings(engine = {}) {
   const e = engine || {};
@@ -225,9 +225,9 @@ function overridesFromSettings(engine = {}) {
 }
 
 /**
- * 展示 / 诊断用的统一入口：不启动 Android 也能算出与真实开机一致的参数。
- * 之前设置页直接调 chooseProfile()（不带版本和加速状态），会在 37.x 机器上
- * 错误地显示已弃用的 swiftshader_indirect / 软件模拟，和实跑参数对不上。
+ * Unified entry for display / diagnostics: compute the same parameters as a real boot without starting Android.
+ * The settings page used to call chooseProfile() without version/accel state, showing the deprecated
+ * swiftshader_indirect / software emulation on 37.x machines, mismatching the actual launch.
  */
 function autoProfile({ settings = {}, accel, emulatorVersion = '', diskMB = 0, port = 5554, adbPort = 5044 } = {}) {
   return chooseProfile({
@@ -237,8 +237,8 @@ function autoProfile({ settings = {}, accel, emulatorVersion = '', diskMB = 0, p
 }
 
 /**
- * 失败重试矩阵：从「最优」到「最保守」，最多 4 次。
- * 依次换 GPU 后端 → 关硬件加速走 TCG → 降内存并强制冷启动清快照。
+ * Failure retry matrix: from best to most conservative, at most 4 attempts.
+ * Swap GPU backend -> disable hw accel (TCG) -> lower memory and force a cold boot to drop the snapshot.
  */
 function planVariants(profile) {
   const out = [];
@@ -265,17 +265,17 @@ function planVariants(profile) {
     cores: 2,
     dataMB: Math.min(profile.dataMB, 2048),
     label: 'Conservative cold boot (minimum memory + fresh snapshot)',
-    // 这里**绝对不能** wipe：以前写的是 wipe:true，而磁盘写满时每次尝试都会失败，
-    // 于是连续重试把用户已装的应用和存档一起「清快照 + 清数据」了 ——
-    // 「磁盘满了，结果打开 ApkStart 应用全没了」就是这么发生的。
-    // 需要重建 userdata 时由 ensureDataPartition 自己判断（它只在镜像损坏时重建），
-    // 不靠启动参数里的 -wipe-data。
+    // Never wipe here: it used to be wipe:true, and with a full disk every attempt failed, so
+    // repeated retries wiped snapshots and data, taking installed apps and saves with them -
+    // that is how "disk full, then every app vanished" happened.
+    // ensureDataPartition decides when userdata must be rebuilt (only on image corruption),
+    // not via -wipe-data in the launch arguments.
     wipe: false,
     snapshot: false,
     lastResort: true,
   });
-  // 去重（相同 gpu/accel/wipe 组合不重复试）——但「最后一档」必须保留：
-  // 它是唯一「不加载快照」的方案，小内存机器上可能和前一档参数完全一样。
+  // Dedupe (identical gpu/accel/wipe combos are not retried) - but the last tier must stay:
+  // it is the only "no snapshot load" option and may be identical to the previous tier on small-RAM machines.
   const seen = new Set();
   return out.filter((v) => {
     const k = `${v.gpu}|${v.accel}|${!!v.wipe}|${v.memoryMB}|${v.snapshot !== false ? 'snap' : 'nosnap'}|${v.lastResort ? 'last' : ''}`;
@@ -285,7 +285,7 @@ function planVariants(profile) {
   });
 }
 
-/** 检测一对空闲端口（emulator console + adb 注册端口必须相邻偶数/奇数） */
+/** Find a free port pair (emulator console + adb registration ports must be adjacent even/odd) */
 function isPortFree(port) {
   return new Promise((resolve) => {
     const srv = net.createServer();
@@ -304,27 +304,27 @@ async function freePortPair(start = 5554) {
 }
 
 /**
- * adb server 端口：固定不复用探测。
- * 之前是"从 5044 往上找一个空闲端口"，但 adb server 本身是常驻进程，占着这个端口，
- * 于是每启动一次 ApkStart 就会多一个 adb server（实测一次会话跑出 6 个），
- * 而且端口老是变，下次启动想接管上次的模拟器时对不上号。
- * 5044 是 ApkStart 专用端口（用户自己的 adb 在 5037），直接固定用。
+ * adb server port: fixed, not probed.
+ * It used to scan upward from 5044 for a free port, but the adb server is a resident process holding it,
+ * so every ApkStart launch added another adb server (6 in one session was observed),
+ * and the shifting port broke adoption of the previous emulator on the next launch.
+ * 5044 is ApkStart's dedicated port (user adb lives on 5037); use it fixed.
  */
 async function freeAdbPort(start = 5044) {
   return Number(process.env.APKSTART_ADB_PORT) || start;
 }
 
 /**
- * 配置指纹：只有「镜像 / 数据分区 / 引擎版本」变化才作废快照。
- * 故意不包含 GPU、加速方式、内存 —— 那些是自动重试会频繁切换的参数，
- * 若纳入会让每次重试都触发 -wipe-data，把用户已装的应用清空。
+ * Config fingerprint: only image / data partition / engine version changes invalidate the snapshot.
+ * GPU, acceleration mode and memory are deliberately excluded - auto-retry flips them often,
+ * and including them would trigger -wipe-data on every retry, deleting installed apps.
  */
 /**
- * quickboot 快照的「配置指纹」：只有这些变化会让旧快照失效（加载后黑屏/起不来）。
+ * Quickboot snapshot "config fingerprint": only these changes invalidate an old snapshot (black screen / no boot).
  *
- * 刻意**不包含 dataMB**：数据分区调大以后旧快照照样能用（qemu 会按新的分区大小
- * 重新挂载），把它算进指纹的后果是「用户只想扩个容，结果快照作废 + 冷启动 +
- * 数据被删」—— 实测踩过一次，代价是整机应用全丢。
+ * **dataMB is deliberately excluded**: an enlarged data partition still works with an old snapshot (qemu mounts
+ * with the new size); counting it would mean "user only wanted more space, got snapshot invalidation + cold boot +
+ * deleted data" - observed once, at the cost of losing every installed app.
  */
 function snapshotKey(plan, imageDir) {
   return crypto.createHash('sha1').update([
@@ -333,12 +333,12 @@ function snapshotKey(plan, imageDir) {
 }
 
 /**
- * 系统镜像的「身份」：只保留 `system-images/...` 之后的部分。
+ * System image "identity": keep only the part after `system-images/...`.
  *
- * 镜像放哪个盘都无所谓，同一套镜像换个目录不该被当成「换了镜像」——
- * 否则用户把运行时从 C 盘挪到 D 盘（我们自己在设置里就建议这么做）以后，
- * AVD 里的 sysdir 与新路径不一致 → 判定镜像变了 → -wipe-data → 已装应用全丢。
- * 这个坑在实测中真的会踩到，所以两个地方（AVD 配置、快照指纹）都必须用身份而不是绝对路径。
+ * The drive does not matter; moving the same images to another directory must not count as "image changed" -
+ * otherwise moving the runtime from C: to D: (which the settings page itself suggests) would
+ * leave AVD sysdir pointing at the old path -> "image changed" -> -wipe-data -> all apps lost.
+ * This trap is real, so both places (AVD config, snapshot fingerprint) must use identity, not absolute paths.
  */
 function imageIdentity(dir) {
   const p = String(dir || '').replace(/\\/g, '/').replace(/\/+$/, '');
@@ -350,10 +350,10 @@ function imageIdentity(dir) {
 const RULES = [
   {
     code: 'ACCESS_VIOLATION',
-    // Windows 上 emulator/qemu 以 0xC0000005（十进制 3221225477）退出：
-    // 实测多见于「显卡驱动 / Vulkan 后端在 guest 刚要启动时崩掉」，
-    // 与 CPU、内存、镜像都无关（同机换 -gpu software 往往就能过）。
-    // 必须排在 GPU_INIT 前面：崩溃日志里通常也带着渲染初始化信息，先判崩溃更准。
+    // On Windows emulator/qemu exits with 0xC0000005 (decimal 3221225477):
+    // observed mostly when the GPU driver / Vulkan backend crashes just as the guest starts;
+    // unrelated to CPU, memory or image (on the same machine -gpu software usually gets through).
+    // Must precede GPU_INIT: crash logs also mention render init, so detecting the crash first is more accurate.
     re: /emulator exit 3221225477|exit code 3221225477|0xC0000005|STATUS_ACCESS_VIOLATION/i,
     title: 'Render backend crash (0xC0000005 access violation)',
     hint: 'Retried automatically with a more conservative render backend and remembered it for next time.'
@@ -361,7 +361,7 @@ const RULES = [
   },
   {
     code: 'GPU_INIT',
-    // 只匹配「失败」语境：正常日志里也会出现 Vulkan/EGL/ANGLE 字样，不能误判为致命错误
+    // Match only failure contexts: normal logs also contain Vulkan/EGL/ANGLE, so do not misjudge them as fatal
     re: /Failed to initialize GL emulation|Could not initialize (OpenGL|emulated framebuffer)|Failed to create .*GLES|EGL_(BAD|NOT_INITIALIZED|CONTEXT_LOST)|Failed to (load|initialize) .*vulkan|vulkan.*(failed|error)|ANGLE.*(fail|error)/i,
     title: 'GPU render backend failed to initialize',
     hint: 'Switched to software rendering and retried. If it still fails, update the GPU driver, or disable Remote Desktop / GPU passthrough and retry.',
@@ -422,8 +422,8 @@ const RULES = [
     hint: 'Switched to the Windows short path automatically. If it still fails, move ApkStart to an English-only folder (e.g. C:\ApkStart).',
   },
   {
-    // 上次被强制结束后 AVD 目录会留下 hardware-qemu.ini.lock / multiinstance.lock，
-    // 模拟器一律拒绝启动，报出来的却是容易被误读成 CPU 问题的话。必须排在 CPU 规则前。
+    // After a forced kill the AVD directory keeps hardware-qemu.ini.lock / multiinstance.lock,
+    // and the emulator refuses to start with a message easily mistaken for a CPU problem. Must precede CPU rules.
     code: 'AVD_LOCK',
     re: /Running multiple emulators with the same AVD|AVD .*is already running|hardware-qemu\.ini\.lock/i,
     title: 'The previous run did not exit cleanly and left a lock file',
@@ -444,7 +444,7 @@ const RULES = [
   },
 ];
 
-/** 把日志翻译成 {code,title,hint}，供 UI 展示与自动重试决策 */
+/** Translate logs into {code,title,hint} for the UI and retry decisions */
 function diagnose(lines) {
   const text = (Array.isArray(lines) ? lines.join('\n') : String(lines || '')).slice(-24000);
   for (const r of RULES) {
@@ -457,14 +457,14 @@ function diagnose(lines) {
   };
 }
 
-/** 人类可读的一行摘要，放在设置页让高级用户知道自动选了什么 */
+/** Human-readable one-line summary on the settings page so advanced users see what was auto-picked */
 function describeProfile(p) {
   return `Auto: ${(p.memoryMB / 1024).toFixed(1)} GB RAM · ${p.cores} cores · ${p.gpu} render · `
     + `${p.accelOk ? 'hardware acceleration' : 'software emulation'} · ${p.snapshot ? 'on-demand snapshot' : 'cold boot'}`
     + `${p.lite ? ' · lightweight container' : ''} · port ${p.port}`;
 }
 
-/** 导出诊断报告（纯文本，便于发邮件/贴 issue） */
+/** Export a diagnostic report (plain text, easy to email / paste into an issue) */
 function writeReport({ dataDir, profile, logLines = [], extra = {} }) {
   const dir = path.join(dataDir, 'logs');
   fs.mkdirSync(dir, { recursive: true });
@@ -496,21 +496,21 @@ function writeReport({ dataDir, profile, logLines = [], extra = {} }) {
 }
 
 /**
- * 检测微软 VC++ 2015-2022 x64 运行库是否安装。
- * 安卓模拟器（Qt6）与 qemu 都依赖它；缺了在「其他电脑」上会直接起不来
- * （报 0xc0000135 / MSVCP140 缺失）。安装版我们已内置 vc_redist.x64.exe，
- * 这里只做检测，供启动前给出明确提示与一键安装入口。
+ * Detect whether the Microsoft VC++ 2015-2022 x64 runtime is installed.
+ * The Android emulator (Qt6) and qemu both need it; without it the app will not start on other PCs
+ * (reporting 0xc0000135 / missing MSVCP140). The installer bundles vc_redist.x64.exe,
+ * so this only detects and feeds a clear prompt plus one-click install before launch.
  */
 function vcRedistOk() {
   if (process.platform !== 'win32') return true;
-  // 先看 DLL：msvcp140 / vcruntime140 正是 Qt6 与 qemu 真正依赖的两个文件。
-  // 用文件判断既不用起 reg.exe（部分安全软件会拦、也会拖慢每 60s 的自检），
-  // 也不会因为注册表项被清理工具删掉而误报「没装」。
+  // Check the DLLs first: msvcp140 / vcruntime140 are the two files Qt6 and qemu actually need.
+  // File checks avoid spawning reg.exe (blocked by some security software, and slows the 60s self-check),
+  // and do not false-report "not installed" when a cleaner removed the registry key.
   const sys = path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32');
   try {
     if (fs.existsSync(path.join(sys, 'msvcp140.dll'))
       && fs.existsSync(path.join(sys, 'vcruntime140.dll'))) return true;
-  } catch (_) { /* 走注册表兜底 */ }
+  } catch (_) { /* fall back to the registry */ }
 
   const key = 'HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64';
   for (const k of [key, key.replace('SOFTWARE\\', 'SOFTWARE\\WOW6432Node\\')]) {
@@ -518,7 +518,7 @@ function vcRedistOk() {
       const out = execFileSync('reg', ['query', k, '/v', 'Installed'],
         { encoding: 'utf8', windowsHide: true, timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
       if (/Installed\s+REG_DWORD\s+0x1/i.test(out)) return true;
-    } catch (_) { /* 键不存在 = 没装 */ }
+    } catch (_) { /* missing key = not installed */ }
   }
   return false;
 }

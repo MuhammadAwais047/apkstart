@@ -1,14 +1,14 @@
 'use strict';
 /**
- * Emulator 引擎：驱动 Google 官方 Android Emulator 作为 ApkStart 的运行时。
+ * Emulator engine: drives Google's official Android Emulator as the ApkStart runtime.
  *
- * 与旧版最大的不同：这里不再假设「一套参数在所有电脑上都能跑」。
- *  1. 用 doctor.chooseProfile() 按内存/CPU/磁盘/加速状态/引擎版本自动推导参数；
- *  2. 启动失败时按 planVariants() 自动降级重试（GPU 后端 → 软件模拟 → 最小内存冷启动）；
- *  3. 动态挑空闲端口、清 AVD 锁、中文路径转短路径、镜像变更后自动作废快照；
- *  4. quickboot 快照 + 小数据分区，做到「像容器一样」共享只读基础层、秒级恢复。
+ * The big change from the old version: it no longer assumes one set of flags runs on every machine.
+ *  1. doctor.chooseProfile() derives flags from memory/CPU/disk/acceleration state/engine version;
+ *  2. failed starts auto-degrade per planVariants() (GPU backend -> software rendering -> minimal-memory cold boot);
+ *  3. picks free ports dynamically, clears AVD locks, converts non-ASCII paths to short paths, drops snapshots when the image changes;
+ *  4. quickboot snapshots + a small data partition give container-like sharing of a read-only base layer and second-scale restore.
  *
- * probe 回调由上层（Runtime）提供，用于判断 Android 是否真正就绪。
+ * The probe callback is supplied by the caller (Runtime) to decide whether Android is really ready.
  */
 const { spawn, spawnSync, execFile } = require('child_process');
 const fs = require('fs');
@@ -24,13 +24,13 @@ const SNAPSHOT_NAME = 'apkstart';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Windows 上把 emulator/qemu 的退出码翻译成人话。
- * 0xC0000005（3221225477）是崩溃里最常见的那个：访问冲突，实测多由
- * 显卡驱动 / Vulkan 后端在 guest 启动瞬间崩掉引起，换软件渲染即可绕过。
+ * Translate emulator/qemu exit codes into human terms on Windows.
+ * 0xC0000005 (3221225477) is the most common crash: an access violation, measured to come mostly from the
+ * graphics driver / Vulkan backend dying the instant the guest boots; switching to software rendering works around it.
  */
 function describeExitCode(code) {
-  // 被信号结束时 code 是 null（Windows 上走 taskkill / adb emu kill 都会这样），
-  // 不能当成 0 报「正常退出」，但也谈不上异常，返回空串让调用方原样显示。
+  // code is null when the process was ended by a signal (true for taskkill / adb emu kill on Windows),
+  // which is neither 0 ("exited normally") nor obviously an error: return an empty string and let the caller show it as-is.
   if (code == null) return '';
   switch (Number(code)) {
     case 0: return 'Exited normally';
@@ -56,8 +56,8 @@ class EmulatorEngine {
     this.attempts = [];
     this.lastDiagnosis = null;
     this.lastExitCode = null;
-    // 快照的 ram.bin ≈ 分配给虚拟机的内存（2-4GB）。
-    // 冷启动本来就快的机器不该为它付出几个 GB 的磁盘，只在「真慢」时才保存。
+    // The snapshot's ram.bin is roughly the memory assigned to the VM (2-4GB).
+    // A machine whose cold boot is already fast should not pay several GB of disk for it, so save only when it is really slow.
     this.snapshotWorthSaving = null;
   }
 
@@ -69,10 +69,10 @@ class EmulatorEngine {
   get settings() { return store.getSettings(); }
 
   /**
-   * 把「最后一次启动失败」落盘。
-   * 旧版只放在内存里（this.attempts），用户重启 ApkStart 后再导出诊断报告，
-   * 报告里就是 attempts: []、bootLog: [] 一片空白，只能在日志里翻 —— 这也是
-   * issue #20/#25 里「附了报告却看不出原因」的直接原因。
+   * Persist the "last start failure" to disk.
+   * The old version kept it only in memory (this.attempts), so exporting a diagnostic report after restarting ApkStart
+   * produced attempts: [] and bootLog: [] - blank, forcing a hunt through the log file. That is also
+   * the direct cause of "the report was attached but shows no reason" in issues #20/#25.
    */
   _persistFailure(extra = {}) {
     try {
@@ -87,10 +87,10 @@ class EmulatorEngine {
         ...extra,
       };
       fs.writeFileSync(path.join(dir, 'last-failure.json'), JSON.stringify(data, null, 2), 'utf8');
-    } catch (_) { /* 落盘失败不影响主流程 */ }
+    } catch (_) { /* a failed write does not affect the main flow */ }
   }
 
-  /** 读回上一次失败记录（诊断报告 / 开机前提示用） */
+  /** Read back the last failure record (for the diagnostic report / pre-boot notice) */
   lastFailure() {
     try {
       return JSON.parse(fs.readFileSync(path.join(store.DATA_DIR, 'logs', 'last-failure.json'), 'utf8'));
@@ -103,7 +103,7 @@ class EmulatorEngine {
 
   get serial() { return `emulator-${this.port}`; }
 
-  /** emulator.exe 与系统镜像目录（优先用户运行时目录，回退到仓库内 engine/） */
+  /** emulator.exe and the system image directory (user runtime first, falling back to the in-repo engine/) */
   locate() {
     const p = this.provisioner.paths();
     const emuCandidates = [p.emulatorExe, path.join(this.appRoot, 'engine', 'emulator', 'emulator.exe')];
@@ -112,7 +112,7 @@ class EmulatorEngine {
     return { emulatorExe, sysImgDir: img.dir, sysImgOk: img.ok, root: emulatorExe ? path.dirname(path.dirname(emulatorExe)) : p.root };
   }
 
-  /** 选镜像：有通用镜像（API 34 Play）就用它，不再让用户切「兼容模式」 */
+  /** Pick the image: use the generic one (API 34 Play) when present, so users never toggle a "compatibility mode" */
   imageChoice() {
     const play = this.provisioner.playImageInfo();
     const base = this.provisioner.systemImageInfo();
@@ -123,9 +123,9 @@ class EmulatorEngine {
   }
 
   /**
-   * 作废 quickboot 快照。
-   * 快照同时保存内存和磁盘镜像，装完新应用/清了数据后如果还加载旧快照，
-   * 用户会看到「刚刚装好的应用重启后又不见了」。
+   * Drop the quickboot snapshot.
+   * A snapshot captures both memory and the disk image, so loading an old one after installing an app or clearing data
+   * makes the user see "the app I just installed vanished after restart".
    */
   invalidateSnapshot() {
     this.cancelSnapshotSave();
@@ -140,10 +140,10 @@ class EmulatorEngine {
   }
 
   /**
-   * 清掉上次异常退出留下的锁。
-   * 注意 hardware-qemu.ini.lock 是**目录**不是文件，bsdtar 式的 rmSync(force) 删不掉它，
-   * 于是模拟器会一直报 "Running multiple emulators with the same AVD" 起不来
-   * （被强杀过一次就会这样），必须递归删。
+   * Clear locks left behind by an abnormal exit.
+   * Note hardware-qemu.ini.lock is a **directory**, not a file: rmSync(force) cannot delete it,
+   * so the emulator keeps reporting "Running multiple emulators with the same AVD" and never starts
+   * (one forced kill is enough), so it must be removed recursively.
    */
   clearLocks(avdDir) {
     try {
@@ -151,33 +151,33 @@ class EmulatorEngine {
         if (!/\.lock$/i.test(f)) continue;
         try {
           fs.rmSync(path.join(avdDir, f), { recursive: true, force: true });
-        } catch (_) { /* 被占用就跳过，下次再清 */ }
+        } catch (_) { /* busy: skip and retry next time */ }
       }
     } catch (_) { /* ignore */ }
   }
 
   /**
-   * AVD 目录里是否真的有一份**完整**的 quickboot 快照。
-   * 只判断「目录非空」是不够的：保存被中断时会留下一个只有 12 字节 snapshot.pb 的空壳，
-   * emulator 会尝试加载、失败（日志 "does not have the requested snapshot"）再回退冷启动，
-   * 白等几秒。这里按文件大小校验，顺手清掉空壳和旧版遗留的 default_boot（单个 3GB）。
+   * Whether the AVD directory really holds a **complete** quickboot snapshot.
+   * "directory is not empty" is not enough: an interrupted save leaves a shell with a 12-byte snapshot.pb,
+   * the emulator tries to load it, fails (log: "does not have the requested snapshot") and falls back to a cold boot,
+   * wasting seconds. This validates by file size and also removes the shell and the legacy default_boot (3GB each).
    */
   hasSnapshot() {
     const base = path.join(this.provisioner.paths().avdHome, `${AVD_NAME}.avd`, 'snapshots', SNAPSHOT_NAME);
     const size = (p) => { try { return fs.statSync(p).size; } catch (_) { return 0; } };
     const pb = size(path.join(base, 'snapshot.pb'));
-    // 新版 emulator（37.x）写的是 ram.bin，老版本写 ram.img。
-    // 只认 ram.img 的后果非常严重：刚存好的 3GB 快照会被当成空壳删掉，
-    // 于是每次都带 -no-snapshot-load，永远冷启动 —— 这是「打开很慢」的一半原因。
+    // Newer emulators (37.x) write ram.bin; older ones wrote ram.img.
+    // Accepting only ram.img is severe: a freshly saved 3GB snapshot gets deleted as a shell,
+    // so every boot carries -no-snapshot-load and always cold-boots - half the reason "opening is slow".
     const ram = Math.max(size(path.join(base, 'ram.bin')), size(path.join(base, 'ram.img')));
     if (pb > 1024 && ram > 1024 * 1024) return true;
-    if (pb === 0 && ram === 0) return false;   // 目录本来就没有，别白删
+    if (pb === 0 && ram === 0) return false;   // nothing there to begin with: do not delete anything
     try { fs.rmSync(base, { recursive: true, force: true }); } catch (_) { /* ignore */ }
     this._cleanLegacySnapshots();
     return false;
   }
 
-  /** 清掉旧版遗留/失败重命名留下的快照目录（default_boot 里的 ram.img 可达 3GB） */
+  /** Remove snapshot directories left by old versions or failed renames (default_boot's ram.img can reach 3GB) */
   _cleanLegacySnapshots() {
     const dir = path.dirname(path.join(this.provisioner.paths().avdHome, `${AVD_NAME}.avd`, 'snapshots', SNAPSHOT_NAME));
     let names = [];
@@ -191,20 +191,20 @@ class EmulatorEngine {
   }
 
   /**
-   * 清掉占着 AVD 锁的孤儿模拟器。
-   * emulator.exe 只是个启动器，真正的 qemu 被 spawn 成独立进程（detached），
-   * 所以只 kill 自己手上的 proc 句柄经常留个孤儿在那占着 multiinstance.lock，
-   * 下一次启动就会 FATAL "Running multiple emulators with the same AVD"。
-   * 按「AVD 锁里的 pid」+「命令行带本 AVD 名的 qemu/emulator」两个来源清。
+   * Clear orphaned emulators holding the AVD lock.
+   * emulator.exe is only a launcher; the real qemu is spawned detached,
+   * so killing only our own proc handle often leaves an orphan holding multiinstance.lock,
+   * and the next start hits FATAL "Running multiple emulators with the same AVD".
+   * Clearing uses two sources: the pid in the AVD lock, and any qemu/emulator whose command line names this AVD.
    */
   async killOrphanProcesses({ onLog = () => {} } = {}) {
     if (process.platform !== 'win32') return 0;
     const avdDir = path.join(this.provisioner.paths().avdHome, `${AVD_NAME}.avd`);
 
-    // 快速路径（每次冷启动都会走到）：
-    //  - 没有 .lock → 不可能有活着的 emulator 占着这个 AVD，直接返回；
-    //  - 有 lock 但端口没人监听 → 只是上次强杀留下的残留目录，清掉即可。
-    // 以前无论什么情况都要跑一次 wmic（1~3 秒，还很吃 CPU），冷启动时明显拖慢。
+    // Fast path (hit by every cold boot):
+    //  - no .lock -> no live emulator can hold this AVD, return immediately;
+    //  - lock present but no port listening -> just a directory left by the last forced kill, clear it.
+    // It used to run wmic unconditionally (1-3 seconds and CPU-hungry), a visible drag on cold boots.
     let locks = [];
     try { locks = fs.readdirSync(avdDir).filter((f) => /\.lock$/i.test(f)); } catch (_) { locks = []; }
     if (!locks.length) return 0;
@@ -214,7 +214,7 @@ class EmulatorEngine {
     }
 
     const pids = new Set();
-    // 1) 锁文件里 emulator 自己写的 pid（最可靠）
+    // 1) the pid the emulator wrote into the lock file (most reliable)
     try {
       const f = path.join(avdDir, 'hardware-qemu.ini.lock', 'pid');
       if (fs.existsSync(f) && fs.statSync(f).isFile()) {
@@ -222,7 +222,7 @@ class EmulatorEngine {
         if (pid) pids.add(pid);
       }
     } catch (_) { /* ignore */ }
-    // 2) 兜底：按进程名 + 端口找活着的 qemu（tasklist/netstat 比 wmic 快一个量级）
+    // 2) fallback: find live qemu by process name + port (tasklist/netstat is an order of magnitude faster than wmic)
     try {
       const [tl, ns] = await Promise.all([
         new Promise((res) => execFile('tasklist', ['/FO', 'CSV', '/NH'], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (e, o) => res(e ? '' : String(o || '')))),
@@ -237,7 +237,7 @@ class EmulatorEngine {
         const m = /:(\d+)\s+\S+\s+LISTENING\s+(\d+)/i.exec(line);
         if (m && qemuPids.has(m[2])) pids.add(Number(m[2]));
       }
-    } catch (_) { /* 拿不到进程列表就只靠锁文件里的 pid */ }
+    } catch (_) { /* no process list: rely on the pid in the lock file */ }
     pids.delete(process.pid);
     if (!pids.size) {
       this.clearLocks(avdDir);
@@ -252,7 +252,7 @@ class EmulatorEngine {
     return pids.size;
   }
 
-  /** 5554~5620 里是否有 emulator 控制台端口在监听（连接被拒会立刻返回，代价极小） */
+  /** Whether any emulator console port in 5554-5620 is listening (a refused connect returns at once, near-zero cost) */
   async _anyEmulatorPortAlive() {
     const net = require('net');
     const probe = (port) => new Promise((resolve) => {
@@ -271,7 +271,7 @@ class EmulatorEngine {
   }
 
   /**
-   * 准备 AVD：写 config.ini。每次启动按当前自动配置重写，保证降级重试即时生效。
+   * Prepare the AVD by writing config.ini. It is rewritten from the current auto config on every start so retries take effect immediately.
    */
   ensureAvd({
     memoryMB = 2048, cores = 2, gpu = 'software', dataMB = 4096,
@@ -283,8 +283,8 @@ class EmulatorEngine {
     fs.mkdirSync(avdDir, { recursive: true });
     this.clearLocks(avdDir);
 
-    // 屏幕分辨率：有硬件加速时 720x1280@320 画面清晰、文字不糊；
-    // 纯软件模拟时降到 540x960，帧率优先（面积只有 56%，肉眼差距远小于流畅度差距）。
+    // Screen size: with hardware acceleration 720x1280@320 is crisp with clear text;
+    // pure software rendering drops to 540x960 for frame rate (56% of the area, a visual gap far smaller than the smoothness gap).
     const screen = lcd || doctor.lcdFor({ accelOk: this.profile ? this.profile.accelOk : accel !== 'off' });
 
     const choice = this.imageChoice();
@@ -306,28 +306,28 @@ class EmulatorEngine {
       const prev = fs.readFileSync(cfgPath, 'utf8');
       const prevTag = /tag\.id=(.+)$/m.exec(prev);
       const prevImg = /image\.sysdir\.1=(.+)$/m.exec(prev);
-      // 比较「镜像身份」而不是绝对路径：同一套镜像换盘/换目录不算换镜像，
-      // 否则用户一改运行时目录就会被清掉所有已装应用（见 doctor.imageIdentity 注释）。
+      // Compare image identity, not absolute paths: the same images moved to another drive/directory are not a new image,
+      // otherwise changing the runtime directory would wipe every installed app (see the doctor.imageIdentity comment).
       const prevId = prevImg ? doctor.imageIdentity(prevImg[1].trim()) : '';
       const wantId = doctor.imageIdentity(wantImg);
       if ((prevTag && prevTag[1].trim() !== tag) || (prevId && prevId !== wantId)) {
-        // 旧 userdata 与新镜像不兼容（APEX 引导循环），必须重建
+        // old userdata is incompatible with the new image (APEX boot loop), so it must be rebuilt
         this.wipePending = true;
       }
     }
 
-    // 配置指纹变化 → 旧 quickboot 快照必然加载失败或产生黑屏，主动作废。
-    // 注意：这里只作废**快照**，绝不能顺手 -wipe-data —— 用户数据里是已装的应用和存档。
+    // A changed config fingerprint means the old quickboot snapshot fails to load or shows a black screen, so drop it.
+    // Note: this drops the **snapshot** only and must never add -wipe-data - user data holds installed apps and saves.
     const key = `${doctor.snapshotKey({
       dataMB, emulatorVersion: this._emuVersion || '', api, tag,
     }, choice.dir)}|${screen.w}x${screen.h}@${screen.dpi}`;
     const keyFile = path.join(avdDir, 'snapshot.key');
     let prevKey = '';
-    try { prevKey = fs.readFileSync(keyFile, 'utf8').trim(); } catch (_) { /* 首次 */ }
+    try { prevKey = fs.readFileSync(keyFile, 'utf8').trim(); } catch (_) { /* first run */ }
     const snapshotStale = !!(prevKey && prevKey !== key);
     if (this.wipePending || snapshotStale || wipe) {
-      // 删除可能被系统/安全软件拦截（快照目录常有几个 GB）。
-      // 失败就改名让 emulator 不再加载它，绝不因为清理失败而中断启动。
+      // The delete may be blocked by the OS or security software (snapshot directories are often several GB).
+      // On failure, rename it so the emulator stops loading it; cleanup failure must never abort the start.
       const snapDir = path.join(avdDir, 'snapshots');
       try {
         fs.rmSync(snapDir, { recursive: true, force: true });
@@ -335,11 +335,11 @@ class EmulatorEngine {
         try { fs.renameSync(snapDir, `${snapDir}.stale-${Date.now()}`); } catch (__) { /* ignore */ }
       }
     }
-    // 只有「镜像换了」（tag / sysdir 变化）才需要 -wipe-data：旧 userdata 与新镜像
-    // 的 APEX 不兼容，不重建会一直卡在引导循环。改容量 / 改分辨率 / 换渲染后端都不算。
+    // Only a changed image (tag / sysdir) needs -wipe-data: old userdata and the new image
+    // have incompatible APEX data and would loop on boot. Capacity / resolution / backend changes do not count.
     fs.writeFileSync(keyFile, key, 'utf8');
 
-    // hw.cpu.arch 必须是 ABI 本身（x86_64 不能截成 x86）
+    // hw.cpu.arch must be the ABI itself (x86_64 must not be truncated to x86)
     const cpuArch = choice.abi === 'arm64-v8a' ? 'arm64'
       : choice.abi === 'armeabi-v7a' ? 'arm' : choice.abi;
 
@@ -355,7 +355,7 @@ class EmulatorEngine {
       `image.sysdir.1=${wantImg}`,
       `tag.id=${tag}`,
       `tag.display=${tagDisplay}`,
-      // 旧版写死 16G，会在小硬盘/配额环境下生成巨型文件并拖慢首次开机
+      // The old version hardcoded 16G, creating huge files on small or quota-limited disks and slowing the first boot
       `disk.dataPartition.size=${dataMB}M`,
       'hw.gpu.enabled=yes',
       `hw.gpu.mode=${gpu}`,
@@ -366,21 +366,21 @@ class EmulatorEngine {
       'hw.mainKeys=no',
       'ShowDeviceFrame=no',
       `PlayStore.enabled=${choice.compat}`,
-      // 快照完全由命令行 -snapshot apkstart 控制：用独立名字，绝不误加载
-      // 旧版遗留的 default_boot（那是 API30 镜像的内存状态，加载必进引导循环）。
+      // The snapshot is controlled purely by -snapshot apkstart on the command line: a dedicated name, never loaded by accident
+      // and never the legacy default_boot (memory state of an API30 image, which always boots into a loop).
       'hw.sdCard=no',
       'hw.audioInput=none',
       'hw.camera.back=none',
       'hw.camera.front=none',
       'hw.gps=no',
-      // 方向/加速度传感器必须关：一旦开启，Android 会按传感器自动旋转，把竖屏
-      // 内容转成横的（画面整体躺倒 90°、文字竖着、四周黑边）。排版切换现在只靠
-      // wm density（改 smallestWidth），不需要也不允许传感器参与。
+      // Orientation/accelerometer sensors must stay off: once enabled, Android auto-rotates from the sensor and turns portrait
+      // content sideways (the whole picture tips 90 degrees, text runs vertically, black bars all round). Layout switching now relies only on
+      // wm density (changing smallestWidth); sensors are neither needed nor allowed.
       'hw.sensors.orientation=no',
     ].join('\n') + '\n';
     fs.writeFileSync(cfgPath, cfg);
 
-    // /data 分区必须先「真的能用」，否则后面一切都是白等（见 ensureDataPartition 注释）
+    // /data must be genuinely usable first or everything after is a wait for nothing (see the ensureDataPartition comment)
     const data = this.ensureDataPartition(avdDir, dataMB);
 
     return {
@@ -390,18 +390,18 @@ class EmulatorEngine {
   }
 
   /**
-   * 保证 userdata 分区是一个**真正可用**的 ext4 —— 这是「点开应用 30 秒进桌面」的地基。
+   * Ensure the userdata partition is a **genuinely usable** ext4 - the foundation of "tap an app, reach the home screen in 30 seconds".
    *
-   * 为什么必须自己做（三条都是实测踩出来的）：
-   *  1. 系统镜像包里的 userdata.img 是 1MB 全零占位，真正格式化靠 avdmanager 调 SDK 的
-   *     mke2fs。ApkStart 直接写 config.ini 拉 emulator，跳过那一步 → /data 全零 →
-   *     内核 "Invalid ext4 superblock on /dev/block/vdc" → guest 掉进 recovery 重启循环 →
-   *     adbd 永远不上线 → 上层 probe 一直 pending，最后 240s 超时。原表现：点开要等好几分钟。
-   *  2. emulator 自带的 e2fsck/resize2fs 是 cygwin 版 e2fsprogs 1.42.12，**不认识 encrypt
-   *     特性**，带这个位它直接 exit 8 拒绝干活，所以「扩文件系统」必须排在补位之前。
-   *  3. 文件系统必须 ≥ 分区大小：只给 64MB 的话，APEX 解压 + dexopt 立刻写满，
-   *     之后所有 setxattr 返回 ENOSPC → SELinux 标签写不进去 → netd/media/tombstoned
-   *     一起 exit 1 → 开机卡在启动动画，adb 永远 offline。
+   * Why we must do it ourselves (all three were learned the hard way):
+   *  1. userdata.img in the system image package is a 1MB all-zero placeholder; real formatting relies on avdmanager calling the SDK's
+   *     mke2fs. ApkStart writes config.ini and starts the emulator directly, skipping that step -> /data is all zero ->
+   *     kernel "Invalid ext4 superblock on /dev/block/vdc" -> the guest loops in recovery ->
+   *     adbd never comes up -> the caller's probe stays pending and finally times out at 240s. Original symptom: minutes of waiting after a tap.
+   *  2. The emulator's bundled e2fsck/resize2fs is cygwin e2fsprogs 1.42.12, which **does not understand the encrypt
+   *     feature**, exits 8 and refuses to work with the bit set, so "grow the filesystem" must precede restoring the bit.
+   *  3. The filesystem must be >= the partition size: at only 64MB, APEX extraction + dexopt fill it at once,
+   *     every setxattr then returns ENOSPC -> SELinux labels cannot be written -> netd/media/tombstoned
+   *     all exit 1 -> boot stalls on the splash animation and adb stays offline.
    */
   ensureDataPartition(avdDir, dataMB = 4096) {
     const emulatorExe = this.locate().emulatorExe;
@@ -411,16 +411,16 @@ class EmulatorEngine {
     const img = path.join(avdDir, 'userdata-qemu.img');
     const wantBytes = Math.max(1024, Math.round(dataMB || 4096)) * 1024 * 1024;
     let size = 0;
-    try { size = fs.statSync(img).size; } catch (_) { /* 不存在 */ }
+    try { size = fs.statSync(img).size; } catch (_) { /* does not exist */ }
 
     if (size > 0 && userdata.hasExt4Superblock(img)) {
-      // 文件够大 + 文件系统也真的长到了这个大小，才算「不用动」。
-      // 只看文件大小会漏掉一种真实故障：qemu-img 撑开了文件、resize2fs 却失败了，
-      // 于是文件 6GB、安卓只有 64MB —— 用户看到的就是「装游戏说空间不足」。
+      // "Nothing to do" requires both a large enough file and a filesystem that really grew to that size.
+      // File size alone misses a real failure mode: qemu-img grew the file but resize2fs failed,
+      // leaving a 6GB file with only 64MB usable in Android - which users see as "not enough space installing games".
       const fsBytes = userdata.fsBytes(img);
       const fsOk = fsBytes >= Math.min(size, wantBytes) * 0.95;
       if (size >= wantBytes && fsOk) return { ok: true, created: false, size, fsBytes };
-      // 容量配置变大了（或文件系统没长到位）：就地扩容，不重建、保留已装应用
+      // Configured capacity grew (or the filesystem fell short): grow in place, preserving installed apps
       try {
         userdata.clearEncryptFlag(img);
         if (size < wantBytes) this._qemuImg('resize', img, wantBytes);
@@ -431,16 +431,16 @@ class EmulatorEngine {
         return { ok: true, created: false, grown: true, size: wantBytes, fsBytes: grown };
       } catch (e) {
         this.log(`Failed to grow userdata (continuing with the existing partition): ${e.message}`);
-        // 老分区仍然可用，但必须如实告诉调用方「这次没扩成」，不能让设置页显示成功
+        // The old partition still works, but the caller must be told "this grow failed" - the settings page must not show success
         return { ok: false, created: false, size, fsBytes, error: e.message };
       }
     }
 
-    // 首次 / 旧版留下的全零占位 / 镜像损坏：全新造一个
+    // First run / the all-zero placeholder left by old versions / a corrupt image: build a fresh one
     try {
       fs.rmSync(img, { force: true });
       fs.rmSync(`${img}.qcow2`, { force: true });
-      // 先不带 encrypt 位（老 e2fsck/resize2fs 才肯干活）
+      // Start without the encrypt bit (the old e2fsck/resize2fs only works that way)
       fs.writeFileSync(img, userdata.buildEmptyExt4({ sizeMB: 64, encrypt: false }));
       this._qemuImg('resize', img, wantBytes);
       this._resize2fs(img);
@@ -448,16 +448,16 @@ class EmulatorEngine {
       this.log(`Rebuilt userdata: ${(wantBytes / 1024 / 1024 / 1024).toFixed(1)}GB ext4 (4K block, FBE capable)`);
       return { ok: true, created: true, size: wantBytes };
     } catch (e) {
-      // 尽力而为：哪怕扩容失败，也要把 encrypt 位补回去，让 FBE 能初始化（分区会偏小）
+      // Best effort: even if growing failed, put the encrypt bit back so FBE can initialise (the partition stays small)
       try { userdata.setEncryptFlag(img); } catch (_) { /* ignore */ }
       this.log(`Failed to rebuild userdata: ${e.message}`);
       return { ok: false, created: true, error: e.message };
     }
   }
 
-  /** emulator 自带 qemu-img.exe：把原始镜像文件撑到目标大小（稀疏，瞬间完成）
-   *  注意参数顺序：`qemu-img <命令> -f raw <文件> <大小>`。
-   *  把 -f 放命令前面会被它当成全局参数直接报 unrecognized option。 */
+  /** The emulator's bundled qemu-img.exe: grow a raw image file to the target size (sparse, instant)
+   *  Note the argument order: `qemu-img <command> -f raw <file> <size>`.
+   *  Putting -f before the command makes it treat it as a global option and report unrecognized option. */
   _qemuImg(op, ...rest) {
     const exe = path.join(path.dirname(this.locate().emulatorExe), 'qemu-img.exe');
     const r = spawnSync(exe, [op, '-f', 'raw', ...rest], {
@@ -466,7 +466,7 @@ class EmulatorEngine {
     if (r.status !== 0) throw new Error(`qemu-img ${op} failed: ${(r.stderr || '').trim() || r.status}`);
   }
 
-  /** emulator 自带 resize2fs.exe（cygwin 版，必须在 bin64 目录下跑才能找到 DLL） */
+  /** The emulator's bundled resize2fs.exe (cygwin build; must run from the bin64 directory to find its DLLs) */
   _resize2fs(img) {
     const bin = path.join(path.dirname(this.locate().emulatorExe), 'bin64');
     const exe = path.join(bin, 'resize2fs.exe');
@@ -477,11 +477,11 @@ class EmulatorEngine {
     if (r.status !== 0) throw new Error(`resize2fs failed: ${(r.stderr || '').trim() || r.status}`);
   }
 
-  /** emulator 依赖这些环境变量定位 SDK / AVD；中文路径一律转 8.3 短路径 */
+  /** The emulator uses these environment variables to locate the SDK / AVD; non-ASCII paths are converted to 8.3 short paths */
   env(root, plan = {}) {
     const safeRoot = doctor.shortPath(root);
-    // AVD 目录必须与 provisioner.paths().avdHome 一致：bundled 只读运行时（EXE 旁
-    // resources/runtime）时 root/avd 不存在也不可写，AVD 要落到用户数据目录。
+    // The AVD directory must match provisioner.paths().avdHome: with a bundled read-only runtime (resources/runtime
+    // next to the EXE) root/avd does not exist and is not writable, so the AVD must live in the user data directory.
     const avdHome = doctor.shortPath(this.provisioner.paths().avdHome);
     const adbPort = String(plan.adbPort || process.env.ANDROID_ADB_SERVER_PORT || '5044');
     return {
@@ -504,30 +504,30 @@ class EmulatorEngine {
     const args = [
       '-avd', AVD_NAME,
       '-port', String(port),
-      // 音频：默认开启（让安卓应用的提示音/视频声音能放出来）。
-      // 仅当用户在设置里显式关闭时才传 -no-audio 省一点 CPU。
+      // Audio: on by default (so Android app notification and video sound is audible).
+      // -no-audio is passed only when the user turned it off explicitly, saving a little CPU.
       ...(this.settings?.engine?.audio === false ? ['-no-audio'] : []),
       '-no-boot-anim',
       '-no-metrics',
-      // 关掉崩溃上报：一旦历史崩溃报告存在，emulator 会弹「同意上传」模态框，
-      // 主线程被卡住、永远不开机（日志表现为 Showing crashdialog to get consent）。
+      // Disable crash reporting: if a past crash report exists, the emulator shows an "agree to upload" modal,
+      // blocking the main thread forever (the log shows Showing crashdialog to get consent).
       '-crash-report-mode', 'disabled',
       '-gpu', gpu,
       '-memory', String(memoryMB),
       '-cores', String(cores),
     ];
-    // 网络：AOSP 模拟器默认走 QEMU 用户态 NAT（-netdev user），安卓侧拿到
-    // 10.0.2.x 的虚拟地址，出口直接复用主机的物理网卡 NAT 出去。
-    // 这种模式【不会】在 Windows 上创建任何虚拟网卡 / 虚拟交换机
-    // （那必须 -netdev tap 或桥接才会发生，我们全程不启用）。
-    // 所以安卓应用用的是"一台挂在主机 NAT 后面的设备"，主机网络栈完全不动，
-    // 不需要装驱动、也不多一个网络适配器。
-    // 显式声明不限速：默认值虽然是 full，但某些 -gpu / -net 组合下会被带上
-    // 模拟器的保守配置，视频类应用（红果、抖音）首屏就会明显慢半拍。
+    // Networking: the AOSP emulator uses QEMU user-mode NAT by default (-netdev user); Android sees
+    // virtual 10.0.2.x addresses and egress reuses the host's physical NIC NAT.
+    // This mode does **not** create any virtual NIC or virtual switch on Windows
+    // (that requires -netdev tap or bridging, which we never enable).
+    // So Android apps sit behind a device on the host's NAT; the host network stack is untouched,
+    // no driver install and no extra network adapter.
+    // Declare no rate limit explicitly: the default is full, but some -gpu / -net combinations pick up
+    // the emulator's conservative setting, and video apps (Hongguo, Douyin) visibly lag on their first screen.
     args.push('-netdelay', 'none', '-netspeed', 'full');
-    // DNS：安卓默认用 10.0.2.3（转发到主机 DNS）。主机走 VPN / 公司网 / 某些运营商
-    // 时，一次解析能拖到几百毫秒，表现为「页面转圈半天才开始加载」。给一份国内公共
-    // DNS 作为首选，失败时系统仍会回退。用户可在设置里关掉（内网域名场景）。
+    // DNS: Android uses 10.0.2.3 by default (forwarded to the host's DNS). With a host VPN / corporate network / some carriers
+    // a single lookup can take hundreds of milliseconds, showing up as "the page spins forever before loading". A public
+    // DNS is offered as the first choice and the system still falls back. Users can disable it (intranet domain cases).
     if (this.settings?.engine?.fastDns !== false) {
       args.push('-dns-server', '223.5.5.5,119.29.29.29');
     }
@@ -535,36 +535,36 @@ class EmulatorEngine {
     if (headless) {
       args.push('-no-window');
     } else {
-      // 注意：**不能再传 -no-skin**。它会覆盖上面的 -skin，让面板尺寸退回
-      // config.ini 里的旧值 —— 表现就是「设置里切了横屏、实际还是竖屏」，
-      // 以及「画面只占左上角一条」。面板尺寸必须由 -skin 决定。
-      // 设备外壳本来就不会画（ShowDeviceFrame=no + 下面这组 style 参数）。
-      // 注意：不能用 -qt-hide-window。它会让模拟器**根本不创建**那个 Qt 窗口，
-      // 而窗口代理正是靠 SetParent 把这个窗口嵌进应用窗口来显示画面的 ——
-      // 用了它之后 probe 永远找不到窗口，用户看到的是一个全黑的应用窗口。
-      // 窗口的隐藏改由窗口代理常驻压制完成（见 win/agent.ps1 的 QuietSweep）。
+      // Note: **never pass -no-skin again**. It overrides the -skin above and reverts the panel size to
+      // the old value in config.ini - the "switched to landscape in settings but it stays portrait" symptom,
+      // plus "the picture occupies only a strip in the top-left". The panel size must come from -skin.
+      // The device frame is never drawn anyway (ShowDeviceFrame=no plus the style flags below).
+      // Note: -qt-hide-window must not be used. It makes the emulator **not create** that Qt window at all,
+      // while the window agent relies on SetParent to embed that window in the app window to show the picture -
+      // with it the probe never finds a window and the user sees an all-black app window.
+      // Hiding the window is instead handled by the always-on suppression in the window agent (QuietSweep in win/agent.ps1).
     }
-    // 只有快照真的存在才传 -snapshot：全新 AVD（或快照刚被作废）时传了它，
-    // qemu 会一直等一份不存在的内存状态，进程活着但永远不开机——
-    // 上层只看到「开机超时」，接着换参数重试，反而被 AVD 锁挡成
+    // Pass -snapshot only when a snapshot really exists: on a fresh AVD (or just after a snapshot was dropped) it makes
+    // qemu wait forever for a memory state that does not exist: the process lives but never boots -
+    // the caller only sees "boot timed out", retries with different flags, and is then blocked by the AVD lock with
     // "Running multiple emulators with the same AVD"。
-    // 快照参数决定「下次开机是 8 秒还是 90 秒」，这里是第二个致命点：
-    // 老实现「没有快照就传 -no-snapshot」，而 -no-snapshot 同时禁掉了**退出时保存**，
-    // 于是第一次冷启动结束后永远产生不了快照，用户每次点开都是全量引导。
-    // 正确做法是 -no-snapshot-load：这次不加载（避免等一个不存在的快照），
-    // 但退出时照常把内存状态写成 apkstart，下次就直接恢复。
-    // 快照要占一份约 2~3GB 的 ram.bin（磁盘紧张的用户可以关掉，只影响启动速度）
+    // Snapshot flags decide whether the next boot takes 8 or 90 seconds; this is the second fatal point:
+    // the old implementation passed -no-snapshot when there was no snapshot, and -no-snapshot also disables **save on exit**,
+    // so no snapshot could ever be produced after the first cold boot and every tap meant a full boot.
+    // The right flag is -no-snapshot-load: do not load this time (avoiding a wait for a nonexistent snapshot),
+    // but still write the memory state to apkstart on exit, so the next start restores directly.
+    // A snapshot costs a ~2-3GB ram.bin (users short on disk can turn it off; only start speed is affected)
     const wantSnapshot = this.settings?.engine?.keepSnapshot !== false;
     if (wipe) {
-      // 重置数据时不能加载旧快照（数据都对不上了），但**必须允许保存新快照**：
-      // 修复网络就是靠「重置后第一次开机有网 → 立刻存快照 → 下次恢复」这条链路，
-      // 老写法这里推的是 -no-snapshot，会把保存一起关掉，快照永远存不下来。
+      // After a data reset the old snapshot must not load (the data no longer matches), but **saving a new one must stay enabled**:
+      // the network fix depends on "first boot after reset has network -> save a snapshot at once -> restore next time",
+      // while the old code pushed -no-snapshot here, disabling saving too, so a snapshot was never stored.
       args.push('-no-snapshot-load');
     } else if (!wantSnapshot) {
       args.push('-no-snapshot');
     } else if (snapshot !== false) {
       args.push('-snapshot', SNAPSHOT_NAME);
-      // 网络自愈要求这次冷启动：快照可能是在「没网」时存的，恢复出来依旧没网。
+      // Network self-healing needs a cold boot this time: the snapshot may have been saved with no network and would restore without it.
       if (!this.hasSnapshot() || this._coldBoot) args.push('-no-snapshot-load');
     } else {
       args.push('-no-snapshot');
@@ -574,7 +574,7 @@ class EmulatorEngine {
     return args;
   }
 
-  /** 拉起单个进程（不做开机等待，开机等待在 start() 的 probe 循环里） */
+  /** Spawn one process (no boot wait here; the boot wait lives in start()'s probe loop) */
   spawnOnce(plan, { headless, onLog, logFile }) {
     const loc = this.locate();
     const env = this.env(loc.root, plan);
@@ -589,10 +589,10 @@ class EmulatorEngine {
       cwd: path.dirname(loc.emulatorExe),
       env,
       windowsHide: true,
-      // detached: 让模拟器独立于 ApkStart 进程组。
-      // Electron 退出时会把自己创建的 job 对象关掉，顺带把子进程一起杀掉——
-      // 表现就是"关掉 ApkStart 再打开又要冷启动 20 多秒"。独立出去之后模拟器留着，
-      // 下次启动直接接管（见 Runtime.adoptExisting），点开就是秒进。
+      // detached: make the emulator independent of the ApkStart process group.
+      // On exit, Electron closes the job object it created and kills the children with it -
+      // which shows up as "close ApkStart, reopen it, and it cold-boots for 20+ seconds again". Detached, the emulator stays,
+      // is adopted on the next start (see Runtime.adoptExisting), and a tap takes seconds.
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -629,9 +629,9 @@ class EmulatorEngine {
       this.proc = null;
     });
 
-    // qemu 是 detached 的独立进程，等它真正起来再把优先级降下来。
-    // 不降的话 2~4 个 vCPU 线程会以 Normal 优先级和 Windows 桌面抢 CPU，
-    // 用户最直观的感受就是「一打开 ApkStart，鼠标就发飘、整机变卡」。
+    // qemu is a detached process: lower its priority once it is really up.
+    // Otherwise 2-4 vCPU threads compete with the Windows desktop at Normal priority,
+    // and the user's first impression is "open ApkStart and the mouse floats, the whole machine stutters".
     const perf = this.settings?.engine?.priorityMode === 'performance';
     setTimeout(() => {
       this.setPriority(perf ? 'normal' : 'below').catch(() => {});
@@ -639,18 +639,18 @@ class EmulatorEngine {
     return { proc, args };
   }
 
-  /** 写模拟器日志：带大小滚动，避免长期使用把磁盘写满 */
+  /** Write the emulator log with size-based rotation so long-term use never fills the disk */
   _logWrite(file, text) {
     const limit = Math.max(2048, Number(this.settings?.engine?.logLimitKB || 2048) * 4);
     require('./logfile').append(file, text, limit);
   }
 
-  /** 当前 /data 镜像的实际情况（设置页展示用，不启动安卓也能取） */
+  /** Current state of the /data image (for the settings page; available without booting Android) */
   dataInfo() {
     const dir = path.join(this.provisioner.paths().avdHome, `${AVD_NAME}.avd`);
     const img = path.join(dir, 'userdata-qemu.img');
     let bytes = 0;
-    try { bytes = fs.statSync(img).size; } catch (_) { /* 还没建 */ }
+    try { bytes = fs.statSync(img).size; } catch (_) { /* not created yet */ }
     return {
       avdDir: dir,
       imageBytes: bytes,
@@ -660,9 +660,9 @@ class EmulatorEngine {
   }
 
   /**
-   * 立即把 /data 分区扩容到指定大小（必须保证模拟器已停止，否则镜像被占用）。
-   * 走的是 ensureDataPartition 的就地扩容路径：qemu-img resize + resize2fs，
-   * 不重建、不丢已装应用与存档。
+   * Grow the /data partition to the given size now (the emulator must be stopped or the image is busy).
+   * Uses ensureDataPartition's in-place grow path: qemu-img resize + resize2fs,
+   * with no rebuild and no loss of installed apps or saves.
    */
   resizeDataPartition(dataMB) {
     const dir = path.join(this.provisioner.paths().avdHome, `${AVD_NAME}.avd`);
@@ -670,8 +670,8 @@ class EmulatorEngine {
   }
 
   /**
-   * 调整本机 qemu/emulator 进程的优先级（只匹配命令行里带本 AVD 名的进程）。
-   * level: idle（容器停放）| below（有应用在前台）| normal（性能优先）。
+   * Adjust the priority of this machine's qemu/emulator processes (matching only those whose command line names this AVD).
+   * level: idle (container parked) | below (an app is in the foreground) | normal (performance first).
    */
   setPriority(level = 'below') {
     if (process.platform !== 'win32') return Promise.resolve(0);
@@ -688,7 +688,7 @@ class EmulatorEngine {
     });
   }
 
-  /** 强杀当前尝试（含 qemu 子进程树） */
+  /** Force-kill the current attempt (including the qemu process tree) */
   async killAttempt() {
     const proc = this.proc;
     this.proc = null;
@@ -699,24 +699,24 @@ class EmulatorEngine {
       }
     }
     await sleep(800);
-    // proc 句柄常常已经没了（emulator.exe 启动完就退出，qemu 是 detached 的独立进程），
-    // 不按进程名兜底清一遍，下一轮就会被 AVD 锁挡成 FATAL。
+    // The proc handle is often gone already (emulator.exe exits after launching; qemu is detached),
+    // and without a name-based sweep the next round is blocked by the AVD lock with FATAL.
     await this.killOrphanProcesses().catch(() => {});
   }
 
   /**
-   * 重建本专用端口上的 adb server。
+   * Rebuild the adb server on this instance's dedicated port.
    *
-   * 这里是「打开应用要等两分钟」最主要的元凶，历史实现只 kill-server 就返回了：
-   * emulator 在启动瞬间会去连 ANDROID_ADB_SERVER_PORT 上的 adb daemon，
-   * 连不上就**再也不注册这台设备** —— adb devices 里要么没有 emulator-5554，
-   * 要么永远停在 offline（日志里就是那句 "Unable to connect to adb daemon on port: 5044"）。
-   * 于是上层 probe 一直拿不到 sys.boot_completed，白等 3 分钟超时后重试，
-   * 每次重试都是全量冷启动，快照也因为「设备不在线」保存不了，形成死循环。
+   * This is the main culprit behind "opening an app takes two minutes"; the historical implementation just ran kill-server and returned:
+   * the emulator connects to the adb daemon on ANDROID_ADB_SERVER_PORT the moment it starts,
+   * and if it cannot connect it **never registers the device** - adb devices either lacks emulator-5554
+   * or shows it stuck offline (the log line "Unable to connect to adb daemon on port: 5044").
+   * The caller's probe never sees sys.boot_completed, waits out a 3-minute timeout and retries,
+   * each retry is a full cold boot, and snapshots cannot be saved because the device is offline: a dead loop.
    *
-   * 所以必须先 kill（清掉旧设备记录）再 start，并等到端口真的在监听才返回。
+   * So kill first (clearing stale device records), then start, and return only once the port is really listening.
    */
-  /** 供上层在 adb 传输卡住（offline / unauthorized）时主动重启一次 server */
+  /** Lets the caller restart the server once when adb transport stalls (offline / unauthorized) */
   async resetAdbServer() {
     const port = Number(process.env.ANDROID_ADB_SERVER_PORT) || this.adbPort || 5044;
     return this._resetAdbServer(port);
@@ -724,7 +724,7 @@ class EmulatorEngine {
 
   async _resetAdbServer(adbPort) {
     let adb = 'adb';
-    try { adb = this.provisioner.adbVersionPath() || 'adb'; } catch (_) { /* 用 PATH 里的 */ }
+    try { adb = this.provisioner.adbVersionPath() || 'adb'; } catch (_) { /* use the one on PATH */ }
     const env = { ...process.env, ANDROID_ADB_SERVER_PORT: String(adbPort) };
     const run = (args, timeout) => new Promise((resolve) => {
       try {
@@ -733,8 +733,8 @@ class EmulatorEngine {
     });
     await run(['kill-server'], 6000);
     await run(['start-server'], 12000);
-    // adb start-server 在部分机器上同步返回得很快，但端口还没真正 listen，
-    // 这里等到能连上为止（最多 ~3 秒，正常几十毫秒）。
+    // On some machines adb start-server returns quickly but the port is not really listening,
+    // so wait until it accepts a connection (up to ~3 seconds; normally tens of milliseconds).
     const net = require('net');
     for (let i = 0; i < 25; i += 1) {
       // eslint-disable-next-line no-await-in-loop
@@ -754,9 +754,9 @@ class EmulatorEngine {
   }
 
   /**
-   * 等待「spawn 后马上退」的情况。
-   * 参数错误/DLL 缺失时 emulator 通常 1 秒内就退；进程还在则立刻返回，
-   * 不必再干等固定 2.5 秒 —— 快照恢复时这段时间足够开机跑完一半。
+   * Catch the "spawn then exit immediately" case.
+   * With bad flags or a missing DLL the emulator usually exits within a second; if the process lives, return at once
+   * instead of a fixed 2.5-second wait - long enough, on a snapshot restore, to finish half the boot.
    */
   _waitSpawnSettled(ms = 900) {
     const proc = this.proc;
@@ -777,28 +777,28 @@ class EmulatorEngine {
   }
 
   /**
-   * 让「下一次启动」强制冷启动（不加载快速启动快照）。
+   * Force the next start to cold-boot (no quickboot snapshot load).
    *
-   * 快照里连网卡状态一起被保存：如果快照是在「没网」的时候存的，之后每次恢复都会
-   * 继续没网。网络自愈时先冷启动一次能绕开这份坏快照。
+   * A snapshot also captures NIC state: one saved with no network restores without network
+   * every time. Cold-booting once during network self-healing bypasses that bad snapshot.
    */
   forceColdBootOnNextStart() { this._coldBoot = true; }
 
   /**
-   * 让「下一次启动」带上 -wipe-data（仅「修复网络」在多种尝试都失败后使用）。
-   * 「删掉 userdata 镜像文件」与 emulator 的 `-wipe-data` 并不等价，必须走后者。
+   * Add -wipe-data to the next start (used only by "repair network" after several attempts fail).
+   * Deleting the userdata image file is not equivalent to the emulator's `-wipe-data`; the latter must be used.
    */
   forceWipeOnNextStart() { this._forceWipe = true; }
 
   /**
-   * 体检虚拟机内是否真的能联网。
+   * Check whether the VM really has network access.
    *
-   * 为什么需要这一步：安卓虚拟机的 Wi-Fi 配置存在 /data 里，一旦写坏（典型表现是
-   * `cmd wifi list-networks` 里同一个 AndroidWifi 出现两条、网络 id 撞车），
-   * wlan0 就会一直 NO-CARRIER、拿不到 IP。这时「需要联网的页面」在应用里就是一块
-   * 黑屏 —— 用户看到的「红果点同意后黑屏」就是这么来的，跟 GPU/渲染完全无关。
+   * Why this step exists: the Android VM's Wi-Fi config lives in /data and, once corrupted (typically
+   * two AndroidWifi entries with colliding network ids in `cmd wifi list-networks`),
+   * wlan0 stays NO-CARRIER and never gets an IP. Any page needing network is then a black
+   * screen - that is the "Hongguo goes black after tapping agree" report, and it has nothing to do with GPU/rendering.
    *
-   * @param {string} [adbPath] 显式指定 adb 可执行文件（Runtime 有更权威的解析）
+   * @param {string} [adbPath] explicit adb executable (Runtime has a more authoritative resolver)
    * @returns {Promise<{ok:boolean, reason:string, gateway?:string, ip?:string}>}
    */
   async checkNetwork(adbPath = '', { waitMs = 0, interval = 3000 } = {}) {
@@ -809,8 +809,8 @@ class EmulatorEngine {
       try { adb = this.provisioner.adbVersionPath() || ''; } catch (_) { adb = ''; }
     }
     if (!adb) {
-      // adbVersionPath() 只查「版本文件」，很多安装形态下是空的；
-      // 直接按运行时根目录找 bundled 的 platform-tools 才稳。
+      // adbVersionPath() only checks a "version file" that is empty in many installation shapes,
+      // so locating bundled platform-tools under the runtime root is more reliable.
       try { adb = path.join(this.locate().root, 'platform-tools', 'adb.exe'); } catch (_) { adb = ''; }
     }
     if (!adb || !fs.existsSync(adb)) adb = 'adb';
@@ -823,10 +823,10 @@ class EmulatorEngine {
         });
       } catch (_) { resolve(''); }
     });
-    // 安卓的多路由表会让 `ip route` 的主表看起来是空的（默认路由在 per-interface 表里），
-    // 而且 shell 的 uid 不在应用的 network 组里，`ping` 经常误报 "Network is unreachable"，
-    // 哪怕 Wi-Fi 其实已经连上、应用也能正常上网。所以这里只认「有没有拿到 IPv4 地址」，
-    // 再叠加 `cmd wifi status` 的连接状态做交叉确认，不用 ping 判断。
+    // Android's multiple routing tables make `ip route`'s main table look empty (the default route is in per-interface tables),
+    // and the shell uid is outside the app's network group, so `ping` often falsely reports "Network is unreachable"
+    // even when Wi-Fi is connected and apps browse fine. So only "did we get an IPv4 address" counts here,
+    // cross-checked against the connection state in `cmd wifi status`; ping is not used.
     const addr = await sh('ip -o addr');
     const ips = [];
     const re = /inet ((?:\d{1,3}\.){3}\d{1,3})\//g;
@@ -839,8 +839,8 @@ class EmulatorEngine {
     const wifi = await sh('cmd wifi status');
     const connected = /Wifi is connected/i.test(wifi);
     if (!ips.length) {
-      // Wi-Fi 关联 + DHCP 往往比 sys.boot_completed 晚几十秒才完成。
-      // 调用方给了 waitMs 就继续等，不要在这一刻就断定「没有网络」。
+      // Wi-Fi association + DHCP often finish tens of seconds after sys.boot_completed.
+      // When the caller passed waitMs, keep waiting instead of declaring "no network" at this instant.
       if (waitMs > 0) {
         const t0 = Date.now();
         while (Date.now() - t0 < waitMs) {
@@ -859,8 +859,8 @@ class EmulatorEngine {
   }
 
   /**
-   * 启动 + 自动重试。
-   * @param {Function} probe 异步回调，返回 'ok' | 'pending' | 'fatal'
+   * Start + automatic retries.
+   * @param {Function} probe async callback returning 'ok' | 'pending' | 'fatal'
    */
   async start({ headless = false, onLog = () => {}, probe = null, maxAttempts = 4 } = {}) {
     if (this.proc && !this.proc.killed) {
@@ -875,10 +875,10 @@ class EmulatorEngine {
     }
 
     const s = this.settings;
-    // 开机前先看一眼磁盘：模拟器写的是 AVD（数据分区 + 快照，几个 GB），
-    // 只有它所在磁盘的余量才决定能不能开机；运行时目录只写日志，要求低得多。
-    // 之前把两者的余量取最小值，结果「数据目录已经挪到 D 盘、C 盘只剩 400MB」
-    // 会被误判成磁盘不足 —— 挪盘等于白挪。
+    // Check the disk before booting: the emulator writes the AVD (data partition + snapshot, several GB),
+    // so only free space on that disk decides whether a boot is possible; the runtime directory only gets logs and needs far less.
+    // It used to take the minimum of the two, so "data moved to D: while C: has 400MB left"
+    // was misjudged as low disk - moving the data directory achieved nothing.
     const avdHome = this.provisioner.paths().avdHome;
     const avdFreeMB = doctor.freeDiskMB(avdHome);
     const diskMB = doctor.freeDiskMB(loc.root);
@@ -899,14 +899,14 @@ class EmulatorEngine {
       return { ok: false, error: msg, needsSpace: true, attempts: [] };
     }
     const adbPort = await doctor.freeAdbPort(Number(process.env.ANDROID_ADB_SERVER_PORT) || 5044);
-    // 让本进程里所有 adb 调用和 emulator 用同一个 server 端口
+    // Make every adb call in this process and the emulator share one server port
     process.env.ANDROID_ADB_SERVER_PORT = String(adbPort);
     this.adbPort = adbPort;
 
-    // 这四件事互不依赖，并行做：以前是「加速检查 → 版本 → 探端口 → 清 adb server」串行，
-    // 冷启动前白等 3~5 秒，正好是用户点开应用后盯着加载框的那段时间。
-    // 上一次运行留下的 adb server 可能还挂着旧设备记录（会把新模拟器挤成 offline），
-    // 所以清 server 仍然要做，只是不必单独等它。
+    // These four are independent, so run them in parallel: they used to run serially (accel check -> version -> port probe -> adb server reset),
+    // wasting 3-5 seconds before a cold boot - exactly the time the user stares at the loading box after a tap.
+    // An adb server left by the previous run may still hold stale device records (forcing the new emulator offline),
+    // so the reset still happens, just without waiting for it separately.
     const [accelInfo, verInfo, startPort] = await Promise.all([
       this.provisioner.emulatorAccel(),
       this.provisioner.emulatorVersion(),
@@ -916,7 +916,7 @@ class EmulatorEngine {
     const emuVersion = verInfo.version || '';
     this._emuVersion = emuVersion;
 
-    // 与设置页 / 诊断报告共用同一个入口，保证「显示的」就是「实跑的」
+    // Shares one entry point with the settings page / diagnostic report, so what is shown is what actually runs
     const profile = doctor.autoProfile({
       settings: s, accel: accelInfo, emulatorVersion: emuVersion, diskMB,
       port: startPort, adbPort,
@@ -924,11 +924,11 @@ class EmulatorEngine {
     this.profile = profile;
     const variants = doctor.planVariants(profile).slice(0, maxAttempts);
 
-    // 记住「上次拉起就崩」的 GPU 后端，下次把它排到最后。
-    // 实测：AMD Radeon 780M 上 `-gpu host` 能通过 emulator 自己的硬件检查，
-    // 但 VM 起来十几秒后进程直接 exit 1（日志里只有 "AEHD is operational"），
-    // 每次都要白等 20 多秒再退到 swangle。key 里带上 emulator 版本，
-    // 升级运行时后自动重新给它一次机会。
+    // Remember a GPU backend that crashed right after launch and rank it last next time.
+    // Measured: on an AMD Radeon 780M, `-gpu host` passes the emulator's own hardware check,
+    // but the process exits 1 a dozen seconds after the VM starts (the log only says "AEHD is operational"),
+    // wasting 20+ seconds each time before falling back to swangle. The key includes the emulator version,
+    // so a runtime upgrade gives it another chance automatically.
     const badGpuKey = this.settings.engine.badGpu || '';
     const [badVer, badGpu] = badGpuKey.includes('|') ? badGpuKey.split('|') : ['', ''];
     if (badGpu && badVer === emuVersion) {
@@ -943,42 +943,42 @@ class EmulatorEngine {
     fs.mkdirSync(path.dirname(logFile), { recursive: true });
     this._logWrite(logFile, `\n\n=== ${new Date().toISOString()} START ${doctor.describeProfile(profile)} ===\n`);
 
-    // 屏幕规格在整个启动过程中保持一致，否则每次重试都换分辨率会狂清快照。
-    // 分辨率来自 doctor 的 profile（设置里可改「画质」），auto 时按加速状态选。
+    // Screen specs stay fixed for the whole start, or each retry with a new resolution would keep wiping snapshots.
+    // Resolution comes from doctor's profile ("quality" in settings) and follows the acceleration state when auto.
     const screen = (profile && profile.lcd) || doctor.lcdFor({ accelOk: accelInfo.ok });
     this.attempts = [];
     this.lastDiagnosis = null;
     let lastError = '';
 
-    // 冷启前先清孤儿：上一次运行留下的 qemu 仍占着 AVD 锁时，
-    // 所有尝试都会立刻 FATAL "Running multiple emulators with the same AVD"。
+    // Clear orphans before a cold boot: if qemu from the previous run still holds the AVD lock,
+    // every attempt immediately hits FATAL "Running multiple emulators with the same AVD".
     // eslint-disable-next-line no-await-in-loop
     await this.killOrphanProcesses({ onLog }).catch(() => {});
 
     for (let i = 0; i < variants.length; i += 1) {
       const base = variants[i];
-      // 端口占用也会导致失败，每次重试重新探测一次
+      // Port conflicts also cause failures, so probe again on every retry
       // eslint-disable-next-line no-await-in-loop
       const port = i === 0 ? startPort : await doctor.freePortPair(startPort + (i * 2));
       const plan = { ...base, port, adbPort, lcd: screen };
       this.port = port;
-      // 每轮重置退出码：上一轮 0xC0000005 不能带进下一轮的诊断里
+      // Reset the exit code each round: the previous round's 0xC0000005 must not leak into the next round's diagnosis
       this.lastExitCode = null;
-      // 日志也按轮切分：内存日志是跨轮累积的，第 1 轮的崩溃行若留在尾部，
-      // 第 2 轮（比如换后端后端口冲突）会被误诊成同一个崩溃。
+      // Logs are split per round too: the in-memory log accumulates across rounds, so a round-1 crash line left at the tail
+      // makes round 2 (say a port conflict after a backend switch) look like the same crash.
       const logStart = this._log.length;
       onLog(`Starting runtime (attempt ${i + 1}/${variants.length}: ${plan.label})…`);
 
       // eslint-disable-next-line no-await-in-loop
       const avd = this.ensureAvd({
         ...plan,
-        // _forceWipe 也要参与「删旧快照」：重置数据后旧快照必然加载失败
-        // （实测报 Failed to load snapshot 后退回冷启动），必须先清掉再重建。
+        // _forceWipe also takes part in "delete the old snapshot": after a data reset the old snapshot always fails to load
+        // (measured as Failed to load snapshot followed by a cold boot), so it must be cleared before rebuilding.
         wipe: plan.wipe || !!this.wipePending || !!this._forceWipe,
       });
-      // 埋点：上层（main）用它在拉起模拟器**之前**打开黑窗压制。
-      // 控制台窗口在 spawn 之后几十毫秒就冒出来，事后再补一次扫描必然闪一下，
-      // 所以这里必须先把它打开、再拉起进程。
+      // Hook: the caller (main) uses it to start black-window suppression **before** the emulator is launched.
+      // The console window appears tens of milliseconds after spawn; scanning afterwards always causes a flash,
+      // so it must be enabled here before the process starts.
       if (this.onBeforeSpawn) {
         // eslint-disable-next-line no-await-in-loop
         try { await this.onBeforeSpawn(); } catch (_) { /* ignore */ }
@@ -986,11 +986,11 @@ class EmulatorEngine {
       // eslint-disable-next-line no-await-in-loop
       const forceWipe = !!this._forceWipe;
       this._forceWipe = false;
-      // _coldBoot 只对这次 spawn 生效，避免之后每次开机都退化成长时间冷启动
+      // _coldBoot applies to this spawn only, so later boots do not degrade into long cold boots
       this.spawnOnce({ ...plan, wipe: plan.wipe || avd.wipePending || forceWipe }, { headless, onLog, logFile });
       this._coldBoot = false;
 
-      // 参数错误 / DLL 缺失会立刻退出
+      // Bad flags / a missing DLL exit immediately
       // eslint-disable-next-line no-await-in-loop
       const dead = await this._waitSpawnSettled(2200);
       if (dead || !this.proc) {
@@ -998,14 +998,14 @@ class EmulatorEngine {
         this.attempts.push({ plan: plan.label, diagnosis: d.code, exitCode: this.lastExitCode });
         this.lastDiagnosis = d;
         lastError = `${d.title}: ${d.hint}`;
-        // 磁盘写满不是「换组参数就能好」的问题：继续重试只会反复失败，
-        // 而且历史上最后那组参数带 wipe，会把用户数据一起抹掉。直接收工、如实报错。
+        // A full disk is not fixed by different flags: retrying just fails again,
+        // and historically the last flag set carried wipe, erasing user data. Stop here and report it honestly.
         if (d.code === 'DISK_FULL') {
           onLog('Not enough disk space; retries stopped (your apps and saves are untouched).');
           this._persistFailure({ profile, why: 'disk-full' });
           return { ok: false, error: lastError, needsSpace: true, attempts: this.attempts, exitCode: this.lastExitCode };
         }
-        // 加速/镜像类结论可能是缓存里的旧数据，作废掉，下次启动重新探测
+        // Acceleration/image conclusions may be stale cached data: drop them and re-probe on the next start
         if (['ACCEL', 'GPU_INIT', 'GPU_MODE', 'IMAGE', 'DLL', 'ACCESS_VIOLATION'].includes(d.code)) {
           try { this.provisioner.invalidateEnvCache(); } catch (_) { /* ignore */ }
         }
@@ -1023,9 +1023,9 @@ class EmulatorEngine {
       let ok = false;
       let fatal = false;
       let sawBooting = false;
-      // 快照恢复往往几秒内就能起，固定 3 秒一次意味着平均要多等 1.5 秒才「发现」
-      // 它已经好了。这里从 200ms 起步逐步放宽到 1.2 秒：开机早期能立刻抓到，
-      // 长引导过程也不会把 CPU 花在轮询上。
+      // A snapshot restore often finishes in seconds, and a fixed 3-second poll means 1.5 seconds on average before noticing
+      // it is ready. The interval starts at 200ms and widens to 1.2 seconds: early boot is caught at once,
+      // and a long boot does not burn CPU on polling.
       let interval = 200;
       let lastNotice = 0;
       // eslint-disable-next-line no-await-in-loop
@@ -1038,9 +1038,9 @@ class EmulatorEngine {
         } catch (_) { state = 'pending'; }
         if (state === 'ok') { ok = true; break; }
         if (state === 'fatal') { fatal = true; break; }
-        // 只要 adb 能执行 shell，说明内核已经在引导，日志里的普通 Vulkan/EGL 信息不算失败
+        // If adb can run a shell, the kernel is booting; ordinary Vulkan/EGL lines in the log are not failures
         if (state === 'booting') sawBooting = true;
-        // 45 秒仍完全没连上，且日志出现明确致命错误 → 提前换方案，不干等 4 分钟
+        // Still not connected at 45 seconds with a clear fatal error in the log -> switch plans early instead of waiting 4 minutes
         if (!sawBooting && Date.now() - started > 45000) {
           const d = doctor.diagnose(this._attemptLines(logStart, 80));
           if (['GPU_INIT', 'ACCEL', 'GPU_MODE', 'IMAGE', 'DLL', 'MEMORY', 'ACCESS_VIOLATION'].includes(d.code)) {
@@ -1050,7 +1050,7 @@ class EmulatorEngine {
             break;
           }
         }
-        // 每 15 秒一条进度：以前用「取模」判断，自适应间隔下会连着打两三条重复的
+        // One progress line every 15 seconds: the old modulo check could emit two or three duplicate
         if (Date.now() - lastNotice > 15000) {
           lastNotice = Date.now();
           onLog(`Booting… ${Math.round((Date.now() - started) / 1000)}s`);
@@ -1062,17 +1062,17 @@ class EmulatorEngine {
 
       if (ok) {
         const bootMs = Date.now() - started;
-        // 这一次真的起来了：清掉上次的失败记录，避免以后「诊断」翻出旧账
+        // This attempt really booted: clear the last failure record so diagnostics do not dig up old history
         this._clearFailure();
-        // 一定要存 quickboot 快照：模拟器进程会随 ApkStart 退出而结束（Electron 的
-        // job 对象会连带杀掉子进程），下次打开有没有快照直接决定是 25 秒还是 7 秒。
-        // 装完新应用时 installer 会作废快照，避免"重启后应用消失"。
+        // Always save a quickboot snapshot: the emulator process ends when ApkStart exits (Electron's
+        // job object kills children), and whether a snapshot exists decides 25 versus 7 seconds on the next open.
+        // After installing an app the installer drops the snapshot, avoiding "the app disappears after restart".
         this.snapshotWorthSaving = true;
         onLog(`Runtime ready (${Math.round(bootMs / 1000)}s, ${plan.label})`);
-        // 开机成功不等于能用：顺手体检网络。虚拟机没网时，需要联网的页面会一直黑屏，
-        // 用户只会说「这个应用黑屏」，很难联想到是网络。这里主动查一次并说清楚。
+        // A successful boot is not usable yet: check the network too. Without it, network-dependent pages stay black,
+        // and users only say "this app is black", rarely suspecting the network. So check once and state it clearly.
         let network = null;
-        try { network = await this.checkNetwork(); } catch (_) { /* 体检失败不算启动失败 */ }
+        try { network = await this.checkNetwork(); } catch (_) { /* a failed check is not a failed start */ }
         if (network && !network.ok) {
           onLog('⚠ The Android VM currently has no network: apps that need internet access (such as short-drama apps) will stay on a black screen.'
             + 'Fix it in "Settings → Repair network" by resetting Android data (the app list is kept and apps reinstall automatically when opened).');
@@ -1120,24 +1120,24 @@ class EmulatorEngine {
   running() { return !!(this.proc && !this.proc.killed); }
 
   /**
-   * 保存 quickboot 快照（下次开机直接恢复内存状态，像 WSA/应用宝的快速启动）。
+   * Save a quickboot snapshot (the next boot restores memory state directly, like WSA/Tencent's fast start).
    *
-   * 时机很重要：以前的实现是开机后 6 秒就存，正好和用户点开应用抢磁盘 I/O
-   * （快照要写 1~3GB），体感反而更慢。改成「空闲时再存」，并由 Runtime 在
-   * 最后一个应用窗口关闭时触发；关机前若还没来得及存，也会补一次。
+   * Timing matters: the old implementation saved 6 seconds after boot, competing with the user's app tap for disk I/O
+   * (a snapshot writes 1-3GB) and felt slower. It now saves when idle, triggered by Runtime when
+   * the last app window closes; if there was no chance before shutdown, one more attempt is made.
    */
   async saveSnapshotNow(adbPath, { timeout = 45000 } = {}) {
     if (!adbPath) return false;
     const ok = await this._saveViaAdb(adbPath, { timeout });
-    // emulator 的 save 命令可能在写盘中途就回 OK，这里按文件完整性再确认一次，
-    // 只有 snapshot.pb 真正落盘才算数（否则下次加载会失败并白等几秒）。
+    // The emulator's save command may return OK midway through writing, so confirm by file integrity,
+    // and only a snapshot.pb actually on disk counts (otherwise the next load fails and wastes seconds).
     if (!ok) return false;
     return this.hasSnapshot();
   }
 
   /**
-   * 安排一次「空闲时保存快照」。
-   * 只排一次；如果到点时容器还有应用在前台，就推迟到真正空闲。
+   * Schedule one "save the snapshot when idle".
+   * Scheduled once; if an app is still in the foreground when it fires, defer until genuinely idle.
    */
   scheduleSnapshotSave(adbPath, { delay = 20000, isIdle = () => true } = {}) {
     if (!adbPath) return;
@@ -1147,8 +1147,8 @@ class EmulatorEngine {
         this._snapTimer = null;
         if (!this.running()) return;
         if (!isIdle()) { arm(15000); return; }
-        // 磁盘余量不够写快照（内存大小 + 1GB 余量）就跳过：硬写只会把磁盘写满，
-        // 进而让下一次开机直接失败。快照只影响启动速度，不写也不影响数据。
+        // Skip when free space cannot hold the snapshot (memory size + 1GB): forcing it only fills the disk
+        // and makes the next boot fail outright. A snapshot only affects start speed; skipping it loses no data.
         const freeMB = require('./doctor').freeDiskMB(store.DATA_DIR);
         const needMB = Math.round(Number(this.profile?.memoryMB || 3072) * 1.15) + 1024;
         if (freeMB && freeMB < needMB) {
@@ -1168,18 +1168,18 @@ class EmulatorEngine {
     this._snapTimer = null;
   }
 
-  /** 优雅停止：慢机器先保存 quickboot 快照，再走控制台关机，最后强杀进程树 */
+  /** Graceful stop: save a quickboot snapshot on slow machines, shut down via the console, then force-kill the tree */
   async stop({ adbPath } = {}) {
     if (!this.proc) {
-      // 接管来的实例没有 proc 句柄，但端口上确实有机器在跑，不能直接返回 true 走人
+      // An adopted instance has no proc handle, yet something really runs on the port: do not just return true and leave
       if (!(await this._anyEmulatorPortAlive())) return true;
     }
     this.cancelSnapshotSave();
     const serial = this.serial;
     if (adbPath && this.snapshotWorthSaving !== false) {
-      // 关机前补存一次：空闲路径没来得及存（比如用户装完应用马上退出）时，
-      // 下一次开机仍然能走快照恢复，而不是重新冷启动。
-      // 3GB 内存写盘要几秒到二十几秒，超时给足，别让快照写一半就被 kill 掉。
+      // Save once more before shutdown: when the idle path had no chance (say the user exits right after installing an app),
+      // the next start can still restore from a snapshot instead of cold-booting.
+      // Writing 3GB takes seconds to tens of seconds: allow a generous timeout so the snapshot is not killed midway.
       await this._saveViaAdb(adbPath, { timeout: 60000 });
     }
     if (adbPath) {
@@ -1188,11 +1188,11 @@ class EmulatorEngine {
           { timeout: 10000, windowsHide: true }, () => resolve());
       });
     }
-    // 等它自己走完「落盘 → 退出」的流程。以前固定等 6 秒就强杀，
-    // 正好把快照写盘掐断，留下一个只有 ram.img 没有 snapshot.pb 的空壳。
+    // Let it finish its own "flush -> exit" flow. It used to be force-killed after a fixed 6 seconds,
+    // cutting the snapshot write short and leaving a shell with ram.img but no snapshot.pb.
     //
-    // 注意不能等 this.proc：emulator.exe 只是个启动器，spawn 完 qemu 自己就退了，
-    // 拿它的 exit 当「关机完成」会立刻进入强杀分支。这里以控制台端口为准。
+    // Note this.proc must not be awaited: emulator.exe is only a launcher that exits after spawning qemu,
+    // so treating its exit as "shutdown complete" jumps straight to the force-kill branch. The console port is authoritative.
     for (let i = 0; i < 100 && (await this._consoleAlive()); i += 1) {
       // eslint-disable-next-line no-await-in-loop
       await sleep(300);
@@ -1202,21 +1202,21 @@ class EmulatorEngine {
   }
 
   /**
-   * 记下「拉起就崩」的 GPU 后端，下次启动把它排到最后。
-   * 只对 auto 模式生效：用户显式指定后端时尊重用户选择，不偷偷改。
+   * Record a GPU backend that "crashes right after launch" and rank it last on the next start.
+   * Applies to auto mode only: an explicit backend choice is respected and never changed silently.
    */
   _noteGpuFailure(plan) {
     try {
       const gpu = plan && plan.gpu;
       if (!gpu) return;
-      // 软件渲染是兜底项，它已经是最慢/最稳的选择，没有更差的替代品可退
+      // Software rendering is the fallback, already the slowest/stablest choice, with nothing worse to fall back to
       if (/software|swiftshader|swangle/.test(gpu)) return;
       if ((this.settings.engine.gpuMode || 'auto') !== 'auto') return;
       store.saveSettings({ engine: { badGpu: `${this._emuVersion || ''}|${gpu}` } });
     } catch (_) { /* ignore */ }
   }
 
-  /** 本实例的控制台端口（5554）上是否还有机器在跑 —— 判断「到底关干净了没有」 */
+  /** Whether anything still runs on this instance's console port (5554) - decides "is it really shut down" */
   _consoleAlive() {
     const net = require('net');
     const port = this.port || 5554;
@@ -1230,7 +1230,7 @@ class EmulatorEngine {
     });
   }
 
-  /** 用 adb 触发一次快照保存（失败返回 false，调用方决定要不要再试） */
+  /** Trigger one snapshot save via adb (returns false on failure; the caller decides whether to retry) */
   _saveViaAdb(adbPath, { timeout = 45000 } = {}) {
     return new Promise((resolve) => {
       execFile(adbPath, ['-s', this.serial, 'emu', 'avd', 'snapshot', 'save', SNAPSHOT_NAME],
@@ -1241,10 +1241,10 @@ class EmulatorEngine {
   recentLog(n = 40) { return this._log.slice(-n).map((x) => x.line); }
 
   /**
-   * 只取「本轮启动尝试」产生的日志行。
-   * 内存日志是跨轮累积的（诊断报告要看到全部尝试），但诊断结论必须只看本轮：
-   * 否则第 1 轮的 `emulator exit 3221225477` 会让第 2 轮的任何失败都被判成同一个崩溃。
-   * 本轮一条日志都没有时（进程压根没起来）退回整体尾部，至少给个结论。
+   * Return only the log lines produced by "this round's start attempt".
+   * The in-memory log accumulates across rounds (the diagnostic report needs every attempt), but the conclusion must use this round only:
+   * otherwise round 1's `emulator exit 3221225477` makes any round-2 failure look like the same crash.
+   * With no lines this round (the process never started) fall back to the overall tail to give at least some conclusion.
    */
   _attemptLines(from, max = 80) {
     const lines = this._log.slice(Math.max(0, from || 0)).map((x) => x.line);
@@ -1252,9 +1252,9 @@ class EmulatorEngine {
   }
 
   /**
-   * 从 emulator.log 文件尾部读最近 n 行（内存缓冲为空时用）。
-   * 用户重启 ApkStart 再导出诊断报告时，内存里的 this._log 已经空了，
-   * 旧版报告因此只剩一句 UNKNOWN —— 真实崩溃原因全在日志文件里。
+   * Read the last n lines of emulator.log (used when the in-memory buffer is empty).
+   * When the user restarts ApkStart and exports a diagnostic report, this._log in memory is already empty,
+   * so the old report was left with a single UNKNOWN line - while the real crash cause sat in the log file.
    */
   tailLogFile(n = 300) {
     try {
@@ -1266,7 +1266,7 @@ class EmulatorEngine {
         const buf = Buffer.alloc(take);
         fs.readSync(fd, buf, 0, take, size - take);
         const lines = buf.toString('utf8').split(/\r?\n/);
-        // 从头读的话第一行可能被截断，丢掉它
+        // Reading from the start can truncate the first line, so drop it
         if (take < size) lines.shift();
         return lines.slice(-n);
       } finally { fs.closeSync(fd); }

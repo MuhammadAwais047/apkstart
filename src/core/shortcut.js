@@ -1,9 +1,9 @@
 'use strict';
 /**
- * 桌面快捷方式 + 多尺寸 ICO 生成
+ * Desktop shortcuts + multi-size ICO generation
  *
- * ICO 直接用 Electron nativeImage 缩放并手写 ICO 容器（DIB 格式，全 Windows 版本兼容），
- * 不依赖任何第三方图像库，也不需要 ImageMagick。
+ * ICOs are scaled with Electron nativeImage and the ICO container is written by hand (DIB format, compatible with every Windows version),
+ * with no third-party image library and no ImageMagick.
  */
 const fs = require('fs');
 const path = require('path');
@@ -20,21 +20,21 @@ function buildDib(bgra, size) {
   header.writeUInt32LE(0, 16);           // BI_RGB
   header.writeUInt32LE(size * size * 4, 20);
 
-  // XOR 位图：自下而上，行内 BGRA
+  // XOR bitmap: bottom-up, BGRA within each row
   const xor = Buffer.alloc(size * size * 4);
   for (let y = 0; y < size; y++) {
     const srcRow = (size - 1 - y) * size * 4;
     bgra.copy(xor, y * size * 4, srcRow, srcRow + size * 4);
   }
-  // AND 掩码：1bpp，行按 4 字节对齐，全 0（交给 alpha 通道）
+  // AND mask: 1bpp, rows aligned to 4 bytes, all zero (left to the alpha channel)
   const maskRow = Math.ceil(size / 32) * 4;
   const mask = Buffer.alloc(maskRow * size, 0);
   return Buffer.concat([header, xor, mask]);
 }
 
 /**
- * @param {Buffer} pngBuffer 任意尺寸的 PNG
- * @returns {Buffer|null} ICO 文件内容
+ * @param {Buffer} pngBuffer PNG at any size
+ * @returns {Buffer|null} ICO file contents
  */
 function pngToIco(pngBuffer) {
   const { nativeImage } = require('electron');
@@ -45,7 +45,7 @@ function pngToIco(pngBuffer) {
   for (const s of ICO_SIZES) {
     const img = base.getSize().width >= s
       ? base.resize({ width: s, height: s, quality: 'best' })
-      : base.resize({ width: s, height: s, quality: 'best' }); // 小图放大也比缺尺寸好
+      : base.resize({ width: s, height: s, quality: 'best' }); // upscaling a small image beats a missing size
     const dib = buildDib(img.toBitmap(), s);
     images.push({ size: s, data: dib });
   }
@@ -77,8 +77,8 @@ function safeFileName(name) {
 }
 
 /**
- * PNG-in-ICO：Vista 起 ICO 条目允许直接内嵌 PNG，不用重编码、不丢 alpha。
- * APK 图标常是 WebP/大尺寸 PNG，老的 DIB 路线在这里会整包失败。
+ * PNG-in-ICO: since Vista an ICO entry may embed PNG directly, with no re-encode and no alpha loss.
+ * APK icons are often WebP or large PNGs, where the old DIB route fails for the whole icon.
  */
 function pngBytesToIco(png) {
   if (!Buffer.isBuffer(png) || png.length < 24 || png.toString('ascii', 1, 4) !== 'PNG') return null;
@@ -101,10 +101,10 @@ function pngBytesToIco(png) {
 }
 
 /**
- * 任意 APK 图标 → ICO。三级兜底，保证快捷方式永远带图标：
- *  1) Electron 能直接解（真 PNG/JPEG）→ 多尺寸 DIB ICO；
- *  2) decode 回调（渲染进程用 Chromium 解 WebP）→ PNG-in-ICO；
- *  3) 品牌占位图标 → PNG-in-ICO。
+ * Any APK icon -> ICO. Three fallback levels so a shortcut always has an icon:
+ *  1) Electron can decode it directly (real PNG/JPEG) -> multi-size DIB ICO;
+ *  2) the decode callback (the renderer decodes WebP with Chromium) -> PNG-in-ICO;
+ *  3) the branded placeholder icon -> PNG-in-ICO.
  */
 async function iconToIco(raw, { decode, onFallback } = {}) {
   const fail = (why) => { try { if (onFallback) onFallback(why); } catch (_) { /* ignore */ } };
@@ -116,7 +116,7 @@ async function iconToIco(raw, { decode, onFallback } = {}) {
       const ico = pngToIco(img.toPNG());
       if (ico) return ico;
     }
-  } catch (_) { /* 非 PNG/JPEG，走下一级 */ }
+  } catch (_) { /* not PNG/JPEG, try the next level */ }
 
   if (typeof decode === 'function') {
     try {
@@ -137,11 +137,11 @@ async function iconToIco(raw, { decode, onFallback } = {}) {
 }
 
 /**
- * 生成桌面快捷方式
+ * Create a desktop shortcut
  *
- * writeShortcutLink 返回 true 并不代表文件真的落盘了：安全软件拦截、
- * 桌面目录被重定向到未登录的网盘时都可能「成功但没文件」。所以写完必须
- * 回读一次，保证调用方拿到的路径是真实存在的入口。
+ * writeShortcutLink returning true does not mean the file really landed: security software interception or
+ * a Desktop directory redirected to a signed-out cloud drive can both "succeed" with no file. So after writing,
+ * read it back once to guarantee the caller receives a path that really exists.
  *
  * @param {object} opt { shortcutPath, target, args, iconIcoPath, description, cwd }
  */

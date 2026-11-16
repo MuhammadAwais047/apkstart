@@ -1,7 +1,7 @@
 'use strict';
 /**
- * adb 客户端封装
- * 只做 apkstart 需要的那部分：安装 / 启动 / 停止 / 卸载 / 文件同步 / 截图
+ * adb client wrapper
+ * Only the subset ApkStart needs: install / launch / stop / uninstall / file sync / screenshots
  */
 const { execFile, spawn } = require('child_process');
 const fs = require('fs');
@@ -19,8 +19,8 @@ const COMMON_ADB_PATHS = [
 ];
 
 /**
- * 把 pm install 的原始失败原因翻译成用户能看懂的中文。
- * 保留原始错误码在末尾，便于搜索排查。
+ * Translate raw pm install failures into messages users can understand.
+ * Keep the original error code at the end for searchability.
  */
 function friendlyInstallError(raw) {
   const code = /INSTALL_[A-Z_]+/.exec(raw);
@@ -57,7 +57,7 @@ function friendlyInstallError(raw) {
   return msg ? `${msg} (${tag})` : `Install failed: ${raw}`;
 }
 
-/** 把启动后的崩溃日志翻译成能看懂的原因 */
+/** Translate post-launch crash logs into understandable causes */
 function friendlyLaunchError(raw, pkg) {
   const t = String(raw || '');
   if (/DoBadTrampoline|libndk_translation|houdini|SIGABRT.*arm/i.test(t)) {
@@ -79,12 +79,12 @@ function friendlyLaunchError(raw, pkg) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** 已解析过的启动入口（adbPath|pkg → activity），10 分钟有效 */
+/** Cached resolved launch entries (adbPath|pkg -> activity), valid for 10 minutes */
 const LAUNCHER_CACHE = new Map();
 
 /**
- * Windows 版 adb 对非 ASCII 路径处理不稳定（中文用户名/中文下载目录很常见）。
- * 安装前把 APK 复制到纯 ASCII 的临时目录，装完即删。
+ * Windows adb is unstable with non-ASCII paths (non-ASCII usernames/download dirs are common).
+ * Copy the APK to a pure-ASCII temp directory before install and delete it afterwards.
  */
 function stageApk(apkPath) {
   const p = String(apkPath || '');
@@ -103,12 +103,12 @@ function unstage(staged) {
 }
 
 /**
- * 把「Activity」拼成 am start -n 需要的完整组件。
- * 两种形式都要支持：
- *   - 纯类名（老版本 apps.json 存的是这种）：`MainActivity` / `.MainActivity` → `<pkg>/<activity>`
- *   - 完整组件（`cmd package resolve-activity` 的输出）：`com.a.b/.Main` → 原样使用
- * 旧实现无条件拼 `${pkg}/${activity}`，遇到完整组件就变成 `pkg/pkg/class`，
- * am start 直接取消（result code=-92），表现是「点图标只看到安卓桌面」。
+ * Assemble the full component am start -n expects from "Activity".
+ * Both forms must be supported:
+ *   - Bare class name (what old apps.json stored): `MainActivity` / `.MainActivity` -> `<pkg>/<activity>`
+ *   - Full component (`cmd package resolve-activity` output): `com.a.b/.Main` -> used as-is
+ * The old code always built `${pkg}/${activity}`, turning a full component into `pkg/pkg/class`,
+ * so am start was cancelled (result code=-92): tapping the icon just showed the Android home screen.
  */
 function componentArg(pkg, activity) {
   const a = String(activity || '').trim();
@@ -117,7 +117,7 @@ function componentArg(pkg, activity) {
   return `${pkg}/${a}`;
 }
 
-/** 从 `cmd package resolve-activity --brief` 的输出里取出属于 pkg 的组件（容忍尾部空行/priority 行） */
+/** Extract the component belonging to pkg from `cmd package resolve-activity --brief` output (tolerates trailing blank/priority lines) */
 function parseResolvedActivity(pkg, out) {
   const lines = String(out || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   for (let i = lines.length - 1; i >= 0; i -= 1) {
@@ -128,9 +128,9 @@ function parseResolvedActivity(pkg, out) {
 }
 
 /**
- * adb install 的超时上限本来固定 240s，但 2GB+ 的安装包在慢盘上
- * 「push + 安装 + dexopt」很容易超过 4 分钟：一旦超时就会被当成安装失败，
- * 用户看到的就是「大包装了没反应/失败」。这里按包体放大，上限 20 分钟。
+ * The adb install timeout used to be fixed at 240s, but a 2 GB+ package on a slow disk
+ * ("push + install + dexopt") easily exceeds 4 minutes; a timeout is treated as an install failure,
+ * which users see as "big package does nothing / fails". Scale by size here, capped at 20 minutes.
  */
 function installTimeoutMs(bytes) {
   const mb = Math.max(1, Number(bytes || 0) / 1048576);
@@ -146,8 +146,8 @@ class AdbError extends Error {
 }
 
 /**
- * 解析 `find -exec stat -c '%Y|%s|%n'` 的输出。
- * 返回 null 表示输出不像 stat 结果（设备不支持）。
+ * Parse `find -exec stat -c '%Y|%s|%n'` output.
+ * Returns null when the output is not stat-like (device does not support it).
  */
 function parseStatList(text) {
   const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
@@ -160,7 +160,7 @@ function parseStatList(text) {
     if (!rel || rel.endsWith('/')) continue;
     rows.push({ rel, size: Number(m[2]), mtime: Number(m[1]) * 1000 });
   }
-  // 有输出但一行都解析不出来 → 说明不是 stat 格式
+  // Output exists but no line parses -> not stat format
   if (!rows.length) return null;
   return rows;
 }
@@ -169,7 +169,7 @@ class AdbClient {
   constructor({ adbPath, serial }) {
     this.adbPath = adbPath || 'adb';
     this.serial = serial || '';
-    this._input = null;        // 常驻 `adb shell` 进程
+    this._input = null;        // resident `adb shell` process
     this._inputSeq = 0;
     this._waiters = new Map(); // id -> { resolve, reject, timer, token }
   }
@@ -183,7 +183,7 @@ class AdbClient {
     for (const c of candidates) {
       try { if (fs.existsSync(c)) return c; } catch (_) { /* ignore */ }
     }
-    return 'adb'; // 交给 PATH
+    return 'adb'; // rely on PATH
   }
 
   _args(args, withSerial = true) {
@@ -204,13 +204,13 @@ class AdbClient {
         maxBuffer: 64 * 1024 * 1024,
         encoding: binary ? 'buffer' : 'utf8',
         windowsHide: true,
-        // 与运行时模拟器共用专用 adb server 端口（默认 5044），与 5037 上的
-        // WSA / 第三方模拟器 adb 隔离，避免注册被反复踢掉导致设备 offline
+        // Share the runtime emulator's dedicated adb server port (default 5044), isolated from
+        // WSA / third-party emulator adb on 5037, so device registration is not kicked into offline
         env: this._adbEnv(),
       }, (err, stdout, stderr) => {
         if (err) {
-          // adb install 的失败原因写在 stdout 且退出码非 0；
-          // 旧版只看 stderr，导致用户永远只看到一句空泛的「失败」。
+          // adb install writes the failure reason to stdout with a non-zero exit code;
+          // the old code only read stderr, so users always saw a vague "failed".
           const text = [stdout, stderr, err.message].filter(Boolean).join('\n').trim();
           const e = new AdbError(`adb ${finalArgs.join(' ')} failed: ${text}`, stderr, err.code);
           e.stdout = stdout;
@@ -228,11 +228,11 @@ class AdbClient {
   }
 
   /**
-   * 常驻输入通道。
-   * 滚轮/返回是高频输入：每格滚轮都 execFile 一个 adb 会起一堆进程，
-   * 桌面会明显发顿。这里复用一条 `adb shell`，每行一条命令，并在末尾
-   * echo 一个结束标记 —— 既知道命令何时真正跑完，也天然形成背压，
-   * 不会让滑动命令在 shell 里排成一长队。
+   * Resident input channel.
+   * Wheel/back are high-frequency inputs: execFile-ing adb per wheel notch spawns piles of processes
+   * and the desktop visibly stutters. Reuse one `adb shell`, one command per line, and echo
+   * a terminator at the end - that tells us when a command really finished and creates backpressure
+   * so swipe commands do not queue up in the shell.
    */
   _inputSession() {
     const old = this._input;
@@ -252,8 +252,8 @@ class AdbClient {
         const line = buf.slice(0, i).trim();
         buf = buf.slice(i + 1);
         for (const [id, w] of this._waiters) {
-          // 必须整行等于标记：某些 shell 会把整条命令行回显出来，
-          // 用 contains 会把「刚写进去」误判成「已执行完」，滑动就会堆积。
+          // The whole line must equal the marker: some shells echo the command line itself,
+          // and a contains() check would mistake "just written" for "done", piling up swipes.
           if (line === w.token) {
             this._waiters.delete(id);
             clearTimeout(w.timer);
@@ -263,8 +263,8 @@ class AdbClient {
         }
       }
     });
-    p.stderr.on('data', () => { /* 忽略：设备离线等信息由调用方兜底 */ });
-    p.stdin.on('error', () => { /* 断开时由 exit 统一清理 */ });
+    p.stderr.on('data', () => { /* ignore: caller handles offline devices etc. */ });
+    p.stdin.on('error', () => { /* exit handler cleans up on disconnect */ });
     p.on('error', () => { this._failWaiters(new Error('Failed to start adb shell')); });
     p.on('exit', () => {
       if (this._input === p) this._input = null;
@@ -281,7 +281,7 @@ class AdbClient {
     this._waiters.clear();
   }
 
-  /** 执行一条白名单内的 input 命令；失败会回收会话，调用方可回退到一次性 adb */
+  /** Run one whitelisted input command; on failure the session is recycled and the caller may fall back to one-shot adb */
   async input(cmd, { timeout = 4000 } = {}) {
     const { isInputCommand } = require('./pointer');
     if (!isInputCommand(cmd)) throw new Error('Invalid input command');
@@ -329,7 +329,7 @@ class AdbClient {
     if (!this.serial.includes(':')) return true;
     try {
       await this.exec(['connect', this.serial], { withSerial: false, timeout: 15000 });
-    } catch (_) { /* 可能已连接 */ }
+    } catch (_) { /* may already be connected */ }
     return this.isOnline();
   }
 
@@ -338,7 +338,7 @@ class AdbClient {
       const { stdout } = await this.exec(['get-state'], { timeout: 8000 });
       return stdout.trim() === 'device';
     } catch (_) {
-      // get-state 在未指定 serial 时不可用，退化用 devices 列表
+      // get-state needs a serial, so fall back to the devices list
       try {
         const { stdout } = await this.exec(['devices'], { withSerial: false, timeout: 8000 });
         return stdout.split('\n').some((l) => l.startsWith(this.serial) && l.includes('device'));
@@ -361,18 +361,18 @@ class AdbClient {
   }
 
   /**
-   * 安装单个 APK，带自动降级：
-   *  - 默认去掉 -g（自动授予全部权限在部分镜像上会让 PermissionController 崩掉）；
-   *  - 带 --bypass-low-target-sdk-block，解决 Android 14 拒绝安装老 targetSdk 应用；
-   *  - adb 版本不认该参数 / 中文路径 / 传输错误时自动换写法重试；
-   *  - NO_MATCHING_ABIS 抛带 code 的错误，交给上层自动切换兼容镜像。
+   * Install a single APK with automatic fallbacks:
+   *  - drop -g by default (auto-granting all permissions crashes PermissionController on some images);
+   *  - pass --bypass-low-target-sdk-block so Android 14 accepts old-targetSdk apps;
+   *  - retry with another invocation when adb rejects the flag / non-ASCII path / transfer errors;
+   *  - NO_MATCHING_ABIS throws an error with a code so the caller can switch images.
    */
   async install(apkPath) {
     if (!fs.existsSync(apkPath)) throw new Error(`APK not found: ${apkPath}`);
     const staged = stageApk(apkPath);
     const file = staged.path;
     const variants = [
-      // -g 自动授予运行时权限，省掉应用里的授权弹窗；部分镜像不支持则自动降级去掉
+      // -g auto-grants runtime permissions and skips in-app dialogs; dropped if the image does not support it
       ['install', '-r', '-t', '-g', '--bypass-low-target-sdk-block', file],
       ['install', '-r', '-t', '--bypass-low-target-sdk-block', file],
       ['install', '-r', '-t', file],
@@ -380,7 +380,7 @@ class AdbClient {
     ];
     let last = '';
     let timeout = 240000;
-    try { timeout = installTimeoutMs(fs.statSync(file).size); } catch (_) { /* 取不到大小就用默认值 */ }
+    try { timeout = installTimeoutMs(fs.statSync(file).size); } catch (_) { /* fall back to the default when size is unavailable */ }
     try {
       for (const args of variants) {
         try {
@@ -401,10 +401,10 @@ class AdbClient {
             err.raw = raw;
             throw err;
           }
-          // 老 adb 不认新参数 / 测试包标记 → 换一种写法
+          // old adb rejects the new flag / test-package marker -> try another invocation
           if (/Unknown option|unrecognized option|Unknown command/i.test(raw)) continue;
           if (tag === 'INSTALL_FAILED_TEST_ONLY' || tag === 'INSTALL_FAILED_DEPRECATED_SDK_VERSION') continue;
-          // 传输类错误（设备掉线、adb server 重启）重试一次
+          // transfer errors (device dropped, adb server restarted) get one retry
           if (/device (not found|offline)|closed|protocol fault|no devices/i.test(raw)) {
             // eslint-disable-next-line no-await-in-loop
             await sleep(1500);
@@ -416,7 +416,7 @@ class AdbClient {
             err.raw = raw;
             throw err;
           }
-          // 没拿到明确错误码：最后一种写法再试
+          // no explicit error code: try the last invocation
         }
       }
       const err = new Error(friendlyInstallError(last || 'Install failed without a clear reason'));
@@ -428,7 +428,7 @@ class AdbClient {
     }
   }
 
-  /** 拆分 APK（.apks / .xapk 解出来的多个分片）走 install-multiple */
+  /** Split APKs (multiple parts from .apks / .xapk) go through install-multiple */
   async installMultiple(apkPaths) {
     if (!apkPaths || !apkPaths.length) throw new Error('No installable split APKs');
     const staged = apkPaths.map((p) => stageApk(p));
@@ -463,7 +463,7 @@ class AdbClient {
     try {
       await this.exec(['uninstall', pkg], { timeout: 60000 });
     } catch (e) {
-      // 部分设备需要指定 user
+      // some devices require an explicit user
       await this.exec(['shell', 'pm', 'uninstall', '--user', '0', pkg], { timeout: 60000 });
     }
   }
@@ -478,16 +478,16 @@ class AdbClient {
     return out.split('\n').map((l) => l.replace('package:', '').trim()).filter(Boolean);
   }
 
-  /** 从系统解析真正的启动 Activity（清单里解析不出来时的兜底） */
-  /** 应用升级后入口可能变，解析前先把这个包从缓存里摘掉 */
+  /** Resolve the real launch Activity from the system (fallback when the manifest parse fails) */
+  /** Entry points can change after an upgrade; evict the package from the cache before resolving */
   clearLauncherCache(pkg) {
     if (!pkg) { LAUNCHER_CACHE.clear(); return; }
     LAUNCHER_CACHE.delete(`${this.adbPath}|${pkg}`);
   }
 
   async resolveLauncher(pkg) {
-    // 解析入口 Activity 要一次 adb 往返（~200-400ms），而它在一个启动会话里不会变。
-    // 缓存起来，第二次点同一个应用直接跳过；10 分钟后自然失效，重装应用也不会用错入口。
+    // Resolving the launch Activity costs an adb round trip (~200-400ms) and does not change within a session.
+    // Cache it so the second tap skips the round trip; it expires after 10 minutes and reinstalls evict it.
     const key = `${this.adbPath}|${pkg}`;
     const hit = LAUNCHER_CACHE.get(key);
     if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.value;
@@ -500,11 +500,11 @@ class AdbClient {
         LAUNCHER_CACHE.set(key, { value: comp, at: Date.now() });
         return comp;
       }
-    } catch (_) { /* 落到 monkey */ }
+    } catch (_) { /* fall back to monkey */ }
     return null;
   }
 
-  /** 应用是否真的活着：am start 返回成功 ≠ 进程没崩 */
+  /** Whether the app is really alive: am start success does not mean the process survived */
   async waitAppAlive(pkg, timeoutMs = 12000) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
@@ -523,23 +523,23 @@ class AdbClient {
       );
     } catch (_) { /* ignore */ }
     const text = String(crash || '').trim();
-    // 没有崩溃日志时不能断言失败：部分大型应用首次启动要 20-40 秒
+    // Without a crash log do not declare failure: some large apps take 20-40s on first start
     return { ok: false, crash: text, uncertain: !text };
   }
 
   /**
-   * 启动应用，带三级降级：
-   *   freeform 独立窗口 → 普通全屏 → monkey 兜底；
-   * 每次都验证进程是否存活，崩溃时抓 logcat 并抛带 code 的错误供上层自动切镜像。
+   * Launch an app with three-level fallback:
+   *   freeform window -> normal fullscreen -> monkey fallback;
+   * each attempt verifies the process survived; on crash it grabs logcat and throws a coded error for image switching.
    */
   async startApp(pkg, activity, { freeform = true, bounds = null, forceStop = false } = {}) {
     if (forceStop) await this.forceStop(pkg);
-    // 必须用系统解析出来的 LAUNCHER 入口，不能只用 APK 里解析到的主 Activity：
-    // 很多应用（红果短剧等）的启动页才做真正的初始化，直接进主 Activity 会
-    // 抛 "had you called RpcService.init"，表现为点开闪一下就没了。
+    // Use the system-resolved LAUNCHER entry, not just the main Activity parsed from the APK:
+    // many apps (the drama app etc.) initialize on their splash page; entering the main Activity directly
+    // throws "had you called RpcService.init" and the app flashes and closes.
     const resolved = (await this.resolveLauncher(pkg).catch(() => '')) || activity;
-    // resolved 可能是完整组件（pkg/class），也可能只是类名（老 apps.json）；
-    // 这里统一成 am start -n 要的完整组件，避免 pkg/pkg/class 被系统取消。
+    // resolved may be a full component (pkg/class) or just a class name (old apps.json);
+    // normalize to the full component am start -n needs, avoiding pkg/pkg/class cancellation.
     const comp = componentArg(pkg, resolved);
     const intent = comp
       ? ['-n', comp]
@@ -567,7 +567,7 @@ class AdbClient {
       if (alive.ok) return out;
       if (alive.uncertain) return `${out}\n (the app is still loading)`;
       lastError = alive.crash || lastError;
-      // 崩溃日志明确指向 ARM 翻译层时不再重试，直接交给上层切换兼容镜像
+      // When the crash log clearly points at the ARM translator, stop retrying and let the caller switch images
       if (/DoBadTrampoline|libndk_translation|UnsatisfiedLinkError|dlopen failed/i.test(alive.crash || '')) {
         const err = new Error(friendlyLaunchError(alive.crash, pkg));
         err.code = 'APP_CRASHED';
@@ -576,7 +576,7 @@ class AdbClient {
       }
     }
 
-    // monkey 兜底：部分镜像的 am start -a/-c/-p 解析不到 launcher
+    // monkey fallback: on some images am start -a/-c/-p cannot resolve the launcher
     try {
       const out = await this.shell(
         `monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`, { timeout: 20000 },
@@ -585,7 +585,7 @@ class AdbClient {
       if (alive.ok || alive.uncertain) return out;
       lastError = alive.crash || lastError;
     } catch (e) {
-      // 有明确崩溃信息时优先用它，否则保留原始启动错误
+      // Prefer explicit crash info; otherwise keep the original launch error
       if (!lastError) lastError = String(e.message || e);
     }
 
@@ -630,10 +630,10 @@ class AdbClient {
     return true;
   }
 
-  /** 开启 freeform（独立窗口）支持，失败不影响主流程 */
+  /** Enable freeform (separate window) support; failure does not affect the main flow */
   async ensureFreeform() {
-    // 合成为一次 adb shell：4 次独立 execFile 在 Windows 上要 600ms+，
-    // 而这段正好在「点开应用」的等待里。
+    // Combine into one adb shell: 4 separate execFiles cost 600ms+ on Windows,
+    // and this sits right in the "tap to open" wait.
     const out = await this.shell(
       'settings put global enable_freeform_support 1 ; '
       + 'settings put global force_resizable_activities 1 ; '
@@ -681,16 +681,16 @@ class AdbClient {
     return String(out).split('\n').map((line) => {
       const l = line.trim();
       if (!l || l.startsWith('total ')) return null;
-      // Android 的 ls -l 有「含 group」和「不含 group」两种格式，日期可能是
-      // "2026-11-12 18:52" 或 "Nov 12 18:52"，用固定正则会全解析不出来。
-      // 权限位之后的第 2 个数字即文件大小，最后一段即文件名。
+      // Android ls -l has with-group and without-group formats; the date may be
+      // "2026-11-12 18:52" or "Nov 12 18:52", which a fixed regex cannot parse at all.
+      // The second number after the permission bits is the size; the last field is the name.
       const parts = l.split(/\s+/);
       if (parts.length < 6 || !/^[\-dl]/.test(parts[0])) return null;
       const sizeIdx = parts.findIndex((p, i) => i >= 2 && /^\d+$/.test(p)
         && /(\d{4}-\d{2}-\d{2}|^[A-Za-z]{3}$)/.test(parts[i + 1] || ''));
       if (sizeIdx < 0) return null;
       const size = Number(parts[sizeIdx]);
-      // 文件名在「时:分」token 之后（日期段 2-3 个 token，不固定）
+      // The name follows the HH:MM token (the date part has a variable 2-3 tokens)
       const timeIdx = parts.findIndex((p, i) => i > sizeIdx && /^\d{1,2}:\d{2}(:\d{2})?$/.test(p));
       const name = parts.slice((timeIdx >= 0 ? timeIdx : sizeIdx + 2) + 1).join(' ');
       return name ? { isDir: parts[0][0] === 'd', size, name } : null;
@@ -698,9 +698,9 @@ class AdbClient {
   }
 
   /**
-   * 带真实 mtime 的远端列表（toybox stat）。
-   * ls -l 的日期是「月 日 时:分」，无法可靠换算，会导致同步误判为「每次都变了」。
-   * 返回 null 表示设备不支持 stat，调用方应退回 listRemote。
+   * Remote listing with real mtimes (toybox stat).
+   * ls -l dates ("Mon DD HH:MM") cannot be converted reliably, making sync think everything changed.
+   * Returns null when the device lacks stat; the caller should fall back to listRemote.
    */
   async listRemoteStat(remote) {
     let out = '';
@@ -714,12 +714,12 @@ class AdbClient {
     return rows;
   }
 
-  /** 清除应用数据 */
+  /** Clear app data */
   async clearData(pkg) {
     await this.shell(`pm clear ${pkg}`);
   }
 
-  /** 导出应用数据（Windows/调试版可用 run-as；否则走 adb backup 兜底） */
+  /** Export app data (run-as on Windows/debug builds; otherwise fall back to adb backup) */
   async exportAppData(pkg, localTarPath) {
     const remote = `/sdcard/apkstart-tmp-${pkg}.tar`;
     const cmd = `run-as ${pkg} tar -cf ${remote} . 2>/dev/null || (cd /data/data/${pkg} && tar -cf ${remote} .)`;
@@ -734,9 +734,9 @@ class AdbClient {
   }
 
   /**
-   * 把应用申请的运行时权限一次性授掉。
-   * 不授会有两个后果：① 首次启动弹系统授权框，用户看到的是「应用没打开」；
-   * ② 清过数据（pm clear）之后权限会掉，应用起来就卡在授权页。
+   * Grant all requested runtime permissions in one pass.
+   * Skipping this has two consequences: (1) a system dialog on first start looks like "the app did not open";
+   * (2) after pm clear the permissions drop and the app stalls on the grant page.
    */
   async grantRuntimePermissions(pkg) {
     let dump = '';
@@ -751,16 +751,16 @@ class AdbClient {
     for (const line of lines) {
       if (/^\s*runtime permissions:/.test(line)) { inRuntime = true; continue; }
       if (!inRuntime) continue;
-      if (/^\s{0,6}\S/.test(line)) break; // 离开 runtime permissions 段
+      if (/^\s{0,6}\S/.test(line)) break; // leave the runtime permissions section
       const m = /^\s+([A-Za-z0-9_.]+):\s*granted=(\w+)/.exec(line);
       if (m && m[2] === 'false') denied.push(m[1]);
     }
     const granted = [];
-    // 授权一次发完：pm grant 每条一次进程在 Windows 上要 150ms+，
-    // 四五个权限就是 1 秒，而这些命令本身没有任何依赖关系。
+    // Send all grants at once: one pm grant process per line costs 150ms+ on Windows,
+    // four or five permissions add up to 1s, and these commands have no dependencies.
     const cmds = [];
     for (const p of denied) cmds.push(`pm grant ${pkg} ${p}`);
-    // 特殊权限走 appops，否则仍然会弹窗
+    // Special permissions go through appops, otherwise dialogs still appear
     const ops = ['MANAGE_EXTERNAL_STORAGE', 'SYSTEM_ALERT_WINDOW', 'REQUEST_INSTALL_PACKAGES', 'WRITE_SETTINGS'];
     for (const op of ops) cmds.push(`cmd appops set ${pkg} ${op} allow`);
     if (cmds.length) {
@@ -771,15 +771,15 @@ class AdbClient {
   }
 
   /**
-   * 进入「就是这个应用」的状态：
-   *  - 收起锁屏，避免开机后停在锁屏挡住应用；
-   *  - 隐藏状态栏（保留底部导航键，鼠标不在手边时还能点返回/主页）；
-   *  - 关掉系统动画，低配机器上体感差别非常大。
-   * 全部是 settings 级命令，一次几百毫秒，重复调用无害。
+   * Enter the "this is the app" state:
+   *  - dismiss the lock screen so boot does not stop at it;
+   *  - hide the status bar (keep the navigation keys so back/home still work without a mouse);
+   *  - disable system animations; a huge difference on low-end machines.
+   * All are settings-level commands costing a few hundred ms and safe to repeat.
    */
   async prepareForeground() {
-    // 以前是 7 条命令串行发，每条都要新起一个 adb 进程（Windows 上 150~250ms），
-    // 合计 1~1.7 秒，全压在「点开应用」的等待里。合成一条 shell 后只剩一次往返。
+    // 7 commands used to run serially, each spawning a new adb process (150-250ms on Windows),
+    // totaling 1-1.7s inside the "tap to open" wait. One combined shell leaves a single round trip.
     const cmds = [
       'wm dismiss-keyguard',
       'settings put global policy_control immersive.status=*',
@@ -788,20 +788,20 @@ class AdbClient {
       'settings put global transition_animation_scale 0',
       'settings put global animator_duration_scale 0',
       'settings put system screen_off_timeout 2147483647',
-      // 注意：这里不要再写 wm user-rotation / accelerometer_rotation。
-      // 方向由 setOrientation / resetDisplayOverrides 按当前横竖屏状态统一定，
-      // 在这里写死 lock 0 会把横屏方向覆盖回竖屏（画面躺倒）。
+      // Note: do not write wm user-rotation / accelerometer_rotation here.
+      // Orientation is decided by setOrientation / resetDisplayOverrides from the current state,
+      // and hard-coding lock 0 here would force landscape back to portrait (image on its side).
     ];
     await this.shell(cmds.join(' ; '), { timeout: 15000 }).catch(() => {});
     return true;
   }
 
-  /** 鼠标右键 / 侧键 / 快捷键映射：走常驻输入通道，右键返回不再有 100ms 级延迟 */
+  /** Mouse right/side buttons / shortcuts map through the resident input channel, removing 100ms-level back delay */
   async _key(code) {
     try {
       await this.input(`input keyevent ${code}`);
     } catch (_) {
-      // 运行时刚重启、常驻 shell 还没连上时，退回一次性 adb，不能把这次点击丢掉
+      // If the runtime just restarted and the resident shell is not connected, fall back to one-shot adb; never drop the click
       await this.shell(`input keyevent ${code}`, { timeout: 6000 }).catch(() => {});
     }
   }
@@ -810,25 +810,25 @@ class AdbClient {
   async keyForward() { return this._key(125); }
 
   /**
-   * 切换「手机排版 / 平板排版」。
+   * Switch between phone and tablet layouts.
    *
-   * 关键：**绝不改 wm size**。改 wm size 会改变 guest framebuffer 的物理尺寸
-   * （720x1280 -> 1280x720），而嵌入的 Qt 窗口仍是原来的尺寸/方向，于是画面被
-   * 压扁或整体躺倒 90°，鼠标坐标映射也跟着错乱。更糟的是 wm size 覆盖会持久化
-   * 在 /data 里，重启后仍然生效 —— 这就是用户反复看到「黑边 / 未填满 / 点不动」
-   * 的根源。
+   * Key: **never change wm size**. Changing it alters the guest framebuffer's physical size
+   * (720x1280 -> 1280x720) while the embedded Qt window keeps its size/orientation, so the image is
+   * squashed or rotated 90 degrees and mouse mapping breaks. Worse, wm size overrides persist
+   * in /data across restarts - the root of the repeated "black bars / not filled / cannot tap"
+   * reports.
    *
-   * 现在只改逻辑密度（wm density），framebuffer 始终是 720x1280 正立：
-   *   - 320dpi -> smallestWidth 360dp -> 手机排版
-   *   - 190dpi -> smallestWidth 606dp（>=600dp）-> 平板 / 分栏排版
-   * 尺寸、方向、点击映射全部不变，因此不会躺倒、不会有黑边、点击永远对应。
+   * Now only logical density changes (wm density); the framebuffer stays upright at 720x1280:
+   *   - 320dpi -> smallestWidth 360dp -> phone layout
+   *   - 190dpi -> smallestWidth 606dp (>=600dp) -> tablet / split layout
+   * Size, orientation and tap mapping stay unchanged, so no tilt, no bars, taps always land.
    */
   async setOrientation(landscape) {
     try {
-      // 自动旋转必须关掉（否则传感器会乱转），但 user_rotation 要按目标方向锁：
-      // 物理面板换成 1280x720 之后，只有把 user-rotation 锁成 1（90°），
-      // Android 才会按横屏方向排版 —— 否则它仍按 rotation 0 渲染竖内容，
-      // Qt 贴进横窗口就变成「躺倒 90°」。
+      // Auto-rotate must be off (the sensor would spin), but user_rotation is locked to the target:
+      // once the physical panel is 1280x720, only user-rotation 1 (90 degrees) makes
+      // Android lay out for landscape - otherwise it renders portrait content at rotation 0
+      // and Qt shows it lying on its side in a landscape window.
       await this.shell('settings put system accelerometer_rotation 0; wm size reset', { timeout: 15000 });
       await this.shell(`wm user-rotation lock ${landscape ? 1 : 0}`, { timeout: 15000 });
       await this.shell(landscape ? 'wm density 190' : 'wm density reset', { timeout: 15000 });
@@ -838,7 +838,7 @@ class AdbClient {
     }
   }
 
-  /** 启动时清掉旧版本残留的 wm size / density 覆盖（持久化在 /data，会一直躺倒） */
+  /** Clear wm size / density overrides left by older versions at startup (they persist in /data and keep the image tilted) */
   async resetDisplayOverrides(landscape = false) {
     try {
       await this.shell('wm size reset; wm density reset', { timeout: 15000 });
@@ -850,7 +850,7 @@ class AdbClient {
     }
   }
 
-  /** 当前逻辑分辨率（横屏切换后窗口要按它算宽高比） */
+  /** Current logical resolution (window aspect ratio is computed from it after a landscape switch) */
   async displaySize() {
     try {
       const out = await this.shell('wm size', { timeout: 8000 });
@@ -862,7 +862,7 @@ class AdbClient {
     return null;
   }
 
-  /** 授权框还挂在最前面时（用户不在电脑前也能自愈），按返回键收掉 */
+  /** When a grant dialog is still on top (self-heal even with nobody at the PC), dismiss it with Back */
   async dismissPermissionDialog() {    try {
       const top = await this.shell('dumpsys activity activities', { timeout: 12000 });
       if (/GrantPermissionsActivity|permissioncontroller/i.test(String(top))) {
@@ -874,8 +874,8 @@ class AdbClient {
   }
 
   /**
-   * 显示适配：全屏时把 Android 分辨率改成显示器尺寸（内容自动铺满），
-   * 窗口模式时恢复竖屏预设。wm 命令是运行时生效的，不需要重启 Android。
+   * Display adaptation: in fullscreen set the Android resolution to the monitor size (content fills it),
+   * in windowed mode restore the portrait preset. wm commands apply at runtime; no Android restart.
    */
   async setDisplaySize(width, height, density) {
     const w = Math.max(320, Math.round(Number(width) || 0));

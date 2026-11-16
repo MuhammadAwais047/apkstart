@@ -1,11 +1,11 @@
 'use strict';
 /**
- * 运行时引擎：ApkStart 自带的 QEMU + Android-x86 虚拟机
+ * Runtime engine: the QEMU + Android-x86 VM bundled with ApkStart
  *
- * 设计原则：
- *  - 默认完全自持（builtin）：adb / QEMU / 系统镜像都由 ApkStart 自己管理，不依赖任何第三方模拟器
- *  - 所有对安卓的操作统一走 adb，因此引擎可替换
- *  - 虚拟机按需启动，空闲自动回收；启动后常驻复用，装/开应用几乎零等待
+ * Design principles:
+ *  - fully self-contained by default (builtin): adb / QEMU / system images are all managed by ApkStart, with no third-party emulator
+ *  - every Android operation goes through adb, so the engine is replaceable
+ *  - the VM starts on demand and is reclaimed when idle; once running it is reused resident, so installing/opening apps is near-instant
  */
 const { spawn, execFile } = require('child_process');
 const net = require('net');
@@ -23,7 +23,7 @@ const MONITOR_PORT = 5556;
 const EMU_PORT = 5554;
 const EMU_SERIAL = `emulator-${EMU_PORT}`;
 
-/** TCP 端口是否有人监听（用来判断上次留下的模拟器还在不在） */
+/** Whether anything listens on a TCP port (used to tell whether the emulator left by a previous run is still up) */
 function portAlive(port, timeout = 150) {
   return new Promise((resolve) => {
     const sock = net.connect({ host: '127.0.0.1', port });
@@ -61,18 +61,18 @@ class Runtime {
     this._freeformReady = false;
     this._client = null;
     this._bootLog = [];
-    this._activeApps = new Set();  // 容器会话：当前打开的应用窗口
-    this.emuSerial = EMU_SERIAL;   // 端口是动态挑的，serial 跟着变
+    this._activeApps = new Set();  // container sessions: app windows currently open
+    this.emuSerial = EMU_SERIAL;   // the port is chosen dynamically, so the serial follows it
     store.ensureDirs();
     if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
   }
 
   get settings() { return store.getSettings(); }
 
-  /** emulator 引擎是否在运行 */
+  /** Whether the emulator engine is running */
   get emuRunning() { return this.emulator.running(); }
 
-  // ---------------- 基础 ----------------
+  // ---------------- basics ----------------
 
   adbPath() {
     const s = this.settings;
@@ -89,7 +89,7 @@ class Runtime {
       || (this.settings.engine.mode === 'attach' ? this.settings.device : this.emuSerial);
     const adbPath = this.adbPath();
     if (!this._client || this._client.serial !== useSerial || this._client.adbPath !== adbPath) {
-      // 换端口/换 adb 时别把旧的常驻 adb shell 留在后台占着连接
+      // When the port/adb changes, do not leave the old resident adb shell holding a connection in the background
       if (this._client && this._client.disposeInput) this._client.disposeInput();
       this._client = new AdbClient({ adbPath, serial: useSerial });
     }
@@ -103,7 +103,7 @@ class Runtime {
     if (this._bootLog.length > 300) this._bootLog.shift();
   }
 
-  // ---------------- 状态 ----------------
+  // ---------------- state ----------------
 
   async status() {
     const env = await this.provisioner.checkEnv();
@@ -137,7 +137,7 @@ class Runtime {
       autoProfile: this.emulator.profile ? doctor.describeProfile(this.emulator.profile) : '',
       diagnosis: this.emulator.lastDiagnosis || null,
       attempts: this.emulator.attempts || [],
-      // 「上次为什么没起来」：内存里没有就回落到落盘记录，设置页/诊断都能显示真实原因
+      // "Why did the last start fail": fall back to the on-disk record when memory is empty, so settings/diagnostics show the real cause
       lastFailure: (this.emulator.lastFailure ? this.emulator.lastFailure() : null),
     };
 
@@ -166,8 +166,8 @@ class Runtime {
     if (result.deviceOnline) result.ready = true;
     else if (!env.emulator.ok) result.needsSetup = 'emulator';
     else if (!env.sysimg.ok) result.needsSetup = 'sysimg';
-    // 不再把「没有硬件加速」当成阻塞步骤：doctor 会自动回退软件模拟，
-    // 并在开机失败时按 GPU/加速/内存组合依次重试。
+    // "No hardware acceleration" is no longer a blocking step: doctor falls back to software emulation
+    // and retries failed boots through GPU/acceleration/memory combinations in order.
     else result.needsSetup = 'boot';
 
     result.phase = result.deviceOnline
@@ -181,7 +181,7 @@ class Runtime {
     return result;
   }
 
-  /** 高级模式：探测本机已有运行时（非默认路径） */
+  /** Advanced mode: detect an existing runtime on this machine (non-default path) */
   async probe() {
     const adbPath = this.adbPath();
     const one = (ep) => new Promise((resolve) => {
@@ -197,7 +197,7 @@ class Runtime {
     return found.filter(Boolean);
   }
 
-  // ---------------- 启动 / 停止虚拟机 ----------------
+  // ---------------- start / stop the VM ----------------
 
   buildArgs({ install = false, headless = false } = {}) {
     const s = this.settings;
@@ -237,7 +237,7 @@ class Runtime {
     const env = await this.provisioner.checkEnv();
     this._hv = env.hypervisor;
 
-    // 首选：官方 emulator（自带设备模型与 GPU 转译，体验最好）
+    // First choice: the official emulator (bundled device model and GPU translation, the best experience)
     if (env.emulator.ok && env.sysimg.ok) {
       return this.bootEmulator({ env, onLog });
     }
@@ -246,8 +246,8 @@ class Runtime {
   }
 
   /**
-   * 用官方 emulator 启动 Android。
-   * 与 QEMU+ISO 不同，这里没有"安装系统"这一步：镜像本身就是系统，首次启动即开机。
+   * Start Android with the official emulator.
+   * Unlike QEMU+ISO there is no "install the OS" step: the image is the system, so the first start is the boot.
    */
   async bootEmulator({ env, onLog = () => {} } = {}) {
     if (this.vmStarting) {
@@ -270,9 +270,9 @@ class Runtime {
 
     this.vmStarting = true;
     try {
-      // probe 交给 EmulatorEngine 的开机循环：进程退出/致命日志时它会换一组参数重试
-      // 每轮只发一次 adb 命令：以前是 get-state + getprop + pm path 三次进程拉起，
-      // 快照恢复时一轮就差 300~500ms，正好卡在「点开应用」的观感上。
+      // The probe goes to EmulatorEngine's boot loop, which retries with another flag set on exit or a fatal log line
+      // One adb command per round: it used to spawn three processes (get-state + getprop + pm path),
+      // costing 300-500ms per round on a snapshot restore - exactly what the "tap an app" feel hinges on.
       let probeStart = Date.now();
       let errStreak = 0;
       let lastHeal = 0;
@@ -292,9 +292,9 @@ class Runtime {
           return booted ? 'pending' : 'booting';
         } catch (_) {
           errStreak += 1;
-          // adb 传输会偶发地卡在 offline / unauthorized（另一个 adb server 抢了端口、
-          // 或者握手被打断），这时每一轮 shell 都报错，probe 永远 pending ——
-          // 上层只会看到「开机超时」，白白等到 240 秒。连错 6 轮就重启一次 server 自愈。
+          // adb transport occasionally stalls at offline / unauthorized (another adb server grabbed the port,
+          // or the handshake was interrupted); every shell round then errors and the probe stays pending -
+          // the caller only sees "boot timed out" and waits out 240 seconds. Six consecutive failures restart the server to self-heal.
           const now = Date.now();
           if (errStreak >= 6 && now - probeStart > 25000 && now - lastHeal > 30000) {
             lastHeal = now;
@@ -311,9 +311,9 @@ class Runtime {
         onLog,
         probe,
       });
-      // start() 失败时是「返回 {ok:false}」而不是抛异常（磁盘不足、多次重试仍失败等）。
-      // 老实现不看这个字段，直接把 ok:true 往上返回 —— 上层于是认为「已经就绪」，
-      // 接着 adb 一顿报 device not found，用户看到的是「点开没反应」而不是真实原因。
+      // start() returns {ok:false} rather than throwing on failure (low disk, repeated retries failing, etc.).
+      // The old code ignored that field and returned ok:true upward - so the caller believed it was ready,
+      // adb then reported device not found repeatedly, and the user saw "tapping does nothing" instead of the real cause.
       if (!st || st.ok === false) {
         return {
           ok: false,
@@ -328,20 +328,20 @@ class Runtime {
       this.emuSerial = st.serial || this.emulator.serial;
       const client = this.client(this.emuSerial);
       await this.prepare(client);
-      // 快照改成「空闲时再存」：立刻存要写 1~3GB，会和用户刚点开的应用抢磁盘 I/O
+      // Snapshots now save when idle: saving at once writes 1-3GB and competes with the app the user just opened
       this._armSnapshotSave(20000);
       return { ok: true, client, engine: 'emulator', serial: this.emuSerial, profile: st.profile, network: st.network || null };
     } catch (e) {
-      // 把自动重试/诊断结论原样抛给 UI，避免再包一层含糊的「启动失败」
+      // Pass the retry/diagnostic conclusion to the UI as-is instead of wrapping it in a vague "start failed"
       return { ok: false, error: e.message, diagnosis: e.diagnosis, report: e.report, attempts: e.attempts };
     } finally {
       this.vmStarting = false;
     }
   }
 
-  // ---------------- 预热（像 WSA 一样让环境常驻） ----------------
+  // ---------------- prewarm (keep the environment resident like WSA) ----------------
 
-  /** 空闲时保存 quickboot 快照：只在没有应用窗口时写盘，避免和应用启动抢 I/O */
+  /** Save the quickboot snapshot when idle: write only with no app window, avoiding I/O contention with app starts */
   _armSnapshotSave(delay = 20000) {
     if (!this.emulator.running()) return;
     this.emulator.scheduleSnapshotSave(this.adbPath(), {
@@ -350,20 +350,20 @@ class Runtime {
     });
   }
 
-  /** 供安装器等外部调用：装完应用后重新存一份快照，下次开机仍是秒进 */
+  /** For external callers such as the installer: re-save a snapshot after installing an app so the next boot is still instant */
   scheduleSnapshotSave(delay = 12000) { this._armSnapshotSave(delay); }
 
   /**
-   * 预热：在用户点开应用之前，先把安卓环境在后台引导好。
-   * WSA / 应用宝电脑版都是这个思路 —— 环境常驻，点图标时只剩一次 am start。
-   *  - 完全静默：不弹窗、不报错，失败不影响正常打开应用；
-   *  - 幂等：正在开机或已就绪时复用同一个 Promise，不会重复拉起第二台；
-   *  - 省资源：开机完成后把 qemu 降到最低优先级停放。
+   * Prewarm: boot the Android environment in the background before the user opens any app.
+   * WSA / Tencent's PC app store follow the same idea: a resident environment, so tapping an icon only needs one am start.
+   *  - fully silent: no dialogs, no errors, and a failure does not block opening apps normally;
+   *  - idempotent: reuses the same Promise while booting or once ready, never starting a second VM;
+   *  - cheap: after boot, park qemu at the lowest priority.
    */
   prewarm({ onLog = () => {} } = {}) {
     if (this._prewarmPromise) return this._prewarmPromise;
     if (this._activeApps.size > 0) return Promise.resolve({ ok: true, skipped: 'busy' });
-    // 高级模式是复用别人家已经跑起来的运行时，不该再替用户开一台自己的
+    // Advanced mode reuses a runtime someone else already started and must not open one of our own
     if (this.settings.engine.mode === 'attach') return Promise.resolve({ ok: false, skipped: 'attach' });
     const t0 = Date.now();
     const p = (async () => {
@@ -372,7 +372,7 @@ class Runtime {
         if (!(env.adb.ok && env.emulator.ok && env.sysimg.ok)) return { ok: false, skipped: 'not-ready' };
         const r = await this.ensure({ onLog: (m) => onLog(`Pre-warm: ${m}`) });
         if (r && r.ok) {
-          // 预热期间用户可能已经点开了应用：这时不能把它摁到 idle 优先级
+          // The user may have opened an app during prewarm: do not push it down to idle priority then
           if (this._activeApps.size === 0) await this.emulator.setPriority('idle').catch(() => {});
           const ms = Date.now() - t0;
           this.log(`Pre-warm done (${Math.round(ms / 1000)}s)`);
@@ -433,7 +433,7 @@ class Runtime {
     this.vmStarting = false;
     if (!this.vmProc) throw new Error(`QEMU failed to start; see the log: ${logFile}`);
 
-    // 装机模式：ISO 里是 Linux 安装程序，没有 adb，不能按「等 adb」处理
+    // Install mode: the ISO holds a Linux installer with no adb, so "wait for adb" does not apply
     if (install) {
       onLog('The installer started; follow the guide in the VM window');
       return { ok: true, install: true, needsManualInstall: true };
@@ -462,8 +462,8 @@ class Runtime {
   }
 
   /**
-   * 等待 Android 真正可用：adb 在线 ≠ 系统可用。
-   * 必须等到 sys.boot_completed=1 且包管理器可响应，否则 am start 会直接失败。
+   * Wait until Android is genuinely usable: adb online does not mean the system is usable.
+   * Both sys.boot_completed=1 and a responsive package manager are required, or am start fails outright.
    */
   async waitAndroidReady(client, timeoutMs, onLog = () => {}) {
     const start = Date.now();
@@ -508,7 +508,7 @@ class Runtime {
     const needConnect = String(client.serial || '').includes(':')
       && !/^emulator-/.test(client.serial);
     while (Date.now() - start < timeoutMs) {
-      // emulator-5554 这类由 emulator 自己注册，不需要 adb connect
+      // Serials like emulator-5554 are registered by the emulator itself and need no adb connect
       if (needConnect) {
         // eslint-disable-next-line no-await-in-loop
         await client.connect().catch(() => false);
@@ -532,20 +532,20 @@ class Runtime {
     this.startWatchdog();
   }
 
-  /** 优雅停止：emulator 走控制台关机，QEMU 走 monitor */
+  /** Graceful stop: the emulator shuts down via its console, QEMU via the monitor */
   async stop({ graceful = true } = {}) {
     const adbPath = this.adbPath();
     if (this.emulator.running()) {
       await this.emulator.stop({ adbPath });
       return true;
     }
-    // 接管来的模拟器（adoptExisting）在本进程里没有 proc 句柄，旧逻辑会直接
-    // return false —— 结果空闲看门狗永远关不掉它，容器一直占着 CPU/内存。
-    // 这条路径改用 adb 控制台关机，必要时再按端口强杀兜底。
+    // An adopted emulator (adoptExisting) has no proc handle in this process, so the old logic
+    // returned false - the idle watchdog could never stop it and the container kept holding CPU/memory.
+    // This path now shuts down via the adb console, falling back to a port-based force kill when needed.
     //
-    // 注意：emulator.exe 只是个启动器，spawn 完 qemu 自己就退了，所以「自己拉起来的」
-    // 机器也常常落到这条分支。关机前必须补一次 saveSnapshotNow，否则快照永远存不下来，
-    // 用户每次点开都是全量冷启动（25 秒 vs 8 秒的差别就在这一步）。
+    // Note: emulator.exe is only a launcher that exits after spawning qemu, so even "ones we started"
+    // often land here. saveSnapshotNow must be called once before shutdown, or no snapshot is ever stored and
+    // every tap is a full cold boot (the difference between 25 and 8 seconds is exactly this step).
     let online = false;
     try { online = await this.client().isOnline(); } catch (_) { /* ignore */ }
     if (online && this.emuSerial) {
@@ -605,7 +605,7 @@ class Runtime {
       };
       sock.setTimeout(timeout, () => done(new Error('monitor timed out')));
       sock.on('error', (e) => {
-        // QEMU 执行 quit 等命令后会主动断开连接（ECONNRESET/EPIPE），属于正常现象
+        // QEMU drops the connection after commands such as quit (ECONNRESET/EPIPE), which is normal
         if (sent && /ECONNRESET|EPIPE/i.test(e.code || String(e))) done(null, buf);
         else done(e);
       });
@@ -632,7 +632,7 @@ class Runtime {
     }
   }
 
-  // ---------------- 安装系统到虚拟磁盘 ----------------
+  // ---------------- install the OS onto the virtual disk ----------------
 
   async startInstaller({ onLog = () => {} } = {}) {
     const env = await this.provisioner.checkEnv();
@@ -646,7 +646,7 @@ class Runtime {
     return r;
   }
 
-  /** 安装完成后：关掉安装程序 → 写标记 → 之后直接从磁盘启动 */
+  /** After installation: shut the installer down -> write the marker -> boot from disk from then on */
   async markInstalled() {
     if (this.installing) {
       try { await this.stop({ graceful: true }); } catch (_) { /* ignore */ }
@@ -659,16 +659,16 @@ class Runtime {
   // ---------------- ensure ----------------
 
   /**
-   * 接管上一次运行留下的模拟器。
-   * 每台模拟器都有自己的控制台端口（5554/5556/…），adb 端口是 +1。
-   * 端口能连上并且 system 已经 boot_completed，就直接当成我们的运行时用，
-   * 这样「关掉 ApkStart 再点开应用」是秒进，而不是再冷启一台。
+   * Adopt the emulator left by the previous run.
+   * Each emulator has its own console port (5554/5556/...), with the adb port at +1.
+   * If the port accepts a connection and the system has boot_completed, use it directly as our runtime,
+   * so "close ApkStart, tap an app again" takes seconds instead of cold-booting another VM.
    */
   /**
-   * 找出所有还活着的模拟器控制台端口。
-   * 不能用「从 5554 顺序试」：端口会随着多次启动往上漂（5554→5556→5558…），
-   * 试固定范围总有试漏的时候，漏了就会再开一台新机器。这里直接按进程名
-   * 找出 qemu 监听的所有 TCP 端口，一个都不会漏。
+   * Find every live emulator console port.
+   * Probing sequentially from 5554 does not work: the port drifts upward across starts (5554 -> 5556 -> 5558 ...),
+   * a fixed range always misses one eventually and a new VM gets started. So instead find every TCP port
+   * qemu listens on by process name - none are missed.
    */
   async emulatorPorts() {
     const run = (cmd, args) => new Promise((resolve) => {
@@ -691,15 +691,15 @@ class Runtime {
         const m = /:(\d+)\s+\S+\s+LISTENING\s+(\d+)/i.exec(line);
         if (m && pids.has(m[2])) ports.add(Number(m[1]));
       }
-    } catch (_) { /* 退回到端口探测 */ }
+    } catch (_) { /* fall back to port probing */ }
 
     if (ports.size) {
-      // 控制台端口（偶数）和 adb 端口（+1）都会被监听，只保留控制台端口
+      // Both the console port (even) and the adb port (+1) listen, so keep the console ports only
       const all = [...ports].sort((a, b) => a - b);
       const consoles = all.filter((p) => ports.has(p + 1));
       return consoles.length ? consoles : all;
     }
-    // 兜底：没有 qemu 进程信息时，直接探测（连接被拒绝会立刻返回，代价很小）
+    // Fallback: with no qemu process info, probe directly (a refused connect returns at once, near-zero cost)
     const found = [];
     for (let port = 5554; port <= 5620; port += 2) {
       // eslint-disable-next-line no-await-in-loop
@@ -716,8 +716,8 @@ class Runtime {
     }
     onLog(`Found ${alive.length} leftover runtimes (ports ${alive.join(', ')}); trying to take over`);
 
-    // adb server 里可能还留着上个进程的 offline 记录（模拟器重启过 adbd 就会这样），
-    // 先清掉再连，否则 get-state 永远返回 offline，会误判成"没就绪"把好好的机器杀掉。
+    // The adb server may still hold offline records from the last process (true after the emulator restarted adbd),
+    // so clear them first; otherwise get-state always says offline and a healthy VM is misjudged as "not ready" and killed.
     await this.client().exec(['kill-server'], { withSerial: false, timeout: 8000 }).catch(() => {});
 
     for (const port of alive) {
@@ -737,8 +737,8 @@ class Runtime {
       }
       if (booted !== '1') {
         onLog(`Found a previous runtime (${serial}) that is not ready; shutting it down and rebooting`);
-        // AVD 目录有锁：留着这台会让新实例直接退出，表现成"怎么都开不了机"。
-        // adb 都连不上了，只能按控制台端口找到进程强杀。
+        // The AVD directory is locked: leaving this one alive makes new instances exit at once, appearing as "never boots at all".
+        // adb cannot connect, so find the process by console port and force-kill it.
         const pid = await this.pidOnPort(port);
         if (pid) {
           await new Promise((resolve) => {
@@ -760,7 +760,7 @@ class Runtime {
     return null;
   }
 
-  /** 某个 TCP 端口是哪个进程在监听（用于强杀卡死的模拟器） */
+  /** Which process listens on a TCP port (used to force-kill a stuck emulator) */
   async pidOnPort(port) {
     return new Promise((resolve) => {
       const { execFile } = require('child_process');
@@ -774,18 +774,18 @@ class Runtime {
   }
 
   /**
-   * 清理上一次运行遗留、却没被接管的孤儿模拟器。
-   * 关掉 ApkStart 时 emulator 是 detached 的，qemu 会存活；下次启动时它仍占着 AVD 锁，
-   * 表现为冷启直接 FATAL "Running multiple emulators with the same AVD"。
-   * 实现收敛到 EmulatorEngine，重试路径（killAttempt）也用同一份逻辑。
+   * Clean up orphaned emulators left by the previous run that were not adopted.
+   * The emulator is detached when ApkStart closes, so qemu survives; on the next start it still holds the AVD lock,
+   * so a cold boot goes straight to FATAL "Running multiple emulators with the same AVD".
+   * The implementation lives in EmulatorEngine, and the retry path (killAttempt) uses the same logic.
    */
   async killOrphanEmulators({ onLog = () => {} } = {}) {
     return this.emulator.killOrphanProcesses({ onLog });
   }
 
   /**
-   * 幂等入口：预热与用户点击可能同时发生，共用一个 Promise，
-   * 避免两边各判断一次「没在线」后各自拉起一台模拟器（AVD 锁冲突 + 双倍内存）。
+   * Idempotent entry: prewarm and a user tap may happen at once and share one Promise,
+   * avoiding both sides judging "not online" and each starting an emulator (AVD lock conflict plus double memory).
    */
   async ensure({ onLog = () => {} } = {}) {
     if (this._ensurePromise) return this._ensurePromise;
@@ -803,13 +803,13 @@ class Runtime {
       return { ok: true, client, engine: 'builtin', reused: true };
     }
 
-    // 上一次 ApkStart 退出时模拟器会留着（下次点开秒进），但新进程里没有它的
-    // 句柄，adb server 也可能被重启过——只靠 isOnline() 会判成"没有运行时"，
-    // 于是又开一台新的。这里先把还活着的模拟器接管过来，避免重复开机器吃内存。
+    // The emulator survives the last ApkStart exit (instant next tap), but the new process has no handle to it
+    // and the adb server may have been restarted - isOnline() alone judges "no runtime",
+    // so another one starts. Here the live emulator is adopted first, avoiding duplicate VMs eating memory.
     const adopted = await this.adoptExisting({ onLog });
     if (adopted) return adopted;
 
-    // 上次会话遗留 / 别的进程拉起的 emulator：换个端口也要复用，绝不重复开一台
+    // An emulator left by the last session / started by another process is reused even on a different port, never duplicated
     try {
       const devices = await client.devices();
       const running = devices.find((d) => /^emulator-\d+$/.test(d.serial) && d.state === 'device');
@@ -821,9 +821,9 @@ class Runtime {
         await this.prepare(c2);
         return { ok: true, client: c2, engine: 'emulator', reused: true };
       }
-    } catch (_) { /* 没找到就正常拉起 */ }
+    } catch (_) { /* nothing found: start normally */ }
 
-    // 进程还在但设备离线（多半卡在引导）：先停掉再重新拉起，避免干等
+    // Process alive but device offline (usually stuck booting): stop it and start again rather than waiting
     if (this.emulator.running()) {
       onLog('Detected a stuck runtime; restarting…');
       await this.emulator.stop({ adbPath: this.adbPath() });
@@ -831,7 +831,7 @@ class Runtime {
 
     const s = this.settings;
 
-    // 高级模式：连接已有运行时
+    // Advanced mode: connect to an existing runtime
     if (s.engine.mode === 'attach') {
       onLog('Probing for existing runtimes…');
       const found = await this.probe();
@@ -846,21 +846,21 @@ class Runtime {
       return { ok: false, needsSetup: 'attach', error: 'No usable existing runtime found' };
     }
 
-    // 默认：自带运行时
-    // 单文件发行版的镜像是压缩的，先展开（已展开过就秒过）。
-    // 展开失败不要把错误吞掉：否则后面 checkEnv() 只会说「还差系统镜像」，
-    // 用户会以为是没下载，而不是解压失败（磁盘满 / 文件损坏）。
+    // Default: the bundled runtime
+    // In the single-file edition the image is compressed, so expand it first (instant if already expanded).
+    // Do not swallow an expansion failure: checkEnv() would then only say "system image missing"
+    // and users would think nothing was downloaded rather than that extraction failed (full disk / corrupt file).
     await this.provisioner.materializeImages(onLog).catch((e) => {
       onLog(`Failed to expand the system image: ${e.message}`);
       this.log(`materialize failed: ${e.message}`);
     });
     const env = await this.provisioner.checkEnv();
 
-    // emulator 路径：镜像即系统，没有"安装到磁盘"这一步
+    // Emulator path: the image is the system, with no "install to disk" step
     if (env.emulator.ok && env.sysimg.ok) {
-      // 关掉 ApkStart 后可能残留未接管的模拟器（detached 的 qemu 仍存活），
-      // 它一直占着 AVD 锁，会让冷启直接 FATAL "Running multiple emulators with the same AVD"。
-      // 接管失败时先把这些孤儿清掉，再冷启，保证「关掉再开」一定能起来。
+      // Unadopted emulators may survive after ApkStart closes (detached qemu still lives),
+      // holding the AVD lock so a cold boot goes straight to FATAL "Running multiple emulators with the same AVD".
+      // When adoption fails, clear these orphans before cold booting, guaranteeing "close and reopen" always works.
       await this.killOrphanEmulators({ onLog }).catch(() => {});
       try {
         const r = await this.boot({ onLog });
@@ -874,7 +874,7 @@ class Runtime {
       }
     }
 
-    // QEMU 路径（用户自备 ISO 并已装到虚拟磁盘）
+    // QEMU path (user-supplied ISO already installed to the virtual disk)
     if (!s.runtime.installed) {
       return {
         ok: false,
@@ -895,16 +895,16 @@ class Runtime {
     }
   }
 
-  // ---------------- 应用级容器会话 ----------------
+  // ---------------- app-level container sessions ----------------
 
   /**
-   * 「像容器一样打开」的具体实现：
-   * Android 环境只引导一次并常驻（quickboot 快照 + adoptExisting 接管），
-   * 之后每次打开 App 只是 am start + 把已有窗口挂进来，不再重跑整个系统。
-   * 这里额外做三件降低系统压力的事：
-   *   - 停掉其他用户 App 的进程，让环境里只跑当前 App 需要的东西；
-   *   - 有窗口时给 qemu 一个「让着前台」的优先级；
-   *   - 只在有窗口时才开启文件同步 / 通知轮询（由 onActive 回调交给 UI 层）。
+   * How "open like a container" actually works:
+   * the Android environment boots once and stays resident (quickboot snapshot + adoptExisting adoption),
+   * after which opening an app is just am start plus attaching the existing window, never rebooting the system.
+   * Three extra things reduce load on the system:
+   *   - stop other user apps' processes so only what the current app needs runs;
+   *   - give qemu a "yield to the foreground" priority while a window is open;
+   *   - enable file sync / notification polling only while a window exists (handed to the UI layer via onActive).
    */
   async beginApp(pkg, { onActive = () => {} } = {}) {
     const first = this._activeApps.size === 0;
@@ -913,21 +913,21 @@ class Runtime {
     const state = container.nextSessionState([...this._activeApps], 'open', pkg);
     const s = this.settings;
     const mode = (s.engine && s.engine.priorityMode) || 'balanced';
-    // 有应用在前台时的调度级别。balanced 用 normal（不是 below）：
-    // below 会让 qemu 在系统繁忙时被饿到，表现为视频解码掉帧、点击要等一下才响应 ——
-    // 这正是「点击不跟手」的主因。normal 只是与桌面同档，并不额外吃 CPU/内存/GPU。
+    // Scheduling level while an app is in the foreground. balanced uses normal (not below):
+    // below starves qemu when the system is busy, showing up as dropped video frames and delayed click response -
+    // the main cause of "clicks do not track". normal merely matches the desktop and costs no extra CPU/memory/GPU.
     const level = mode === 'game' ? 'game' : 'normal';
 
     if (first) {
-      // 有应用要开了：把「空闲存快照」推迟，别在应用启动时抢磁盘
+      // An app is about to open: defer "save the snapshot when idle" so it does not contend for disk during the start
       this.emulator.cancelSnapshotSave();
     }
-    // 每次打开/切回应用都确保优先级到位：endApp 会把空闲的 qemu 降到 idle，
-    // 切换回来时若不重新提，就会停在低优先级 → 点起来发木。setPriority 幂等，
-    // 已经是目标值时脚本内部不改、开销极小。
+    // Ensure the priority on every open / switch back: endApp drops an idle qemu to idle,
+    // and without raising it again on return it stays low -> input feels wooden. setPriority is idempotent
+    // and does nothing inside the script when already at the target, so the cost is tiny.
     await this.emulator.setPriority(level).catch(() => {});
     if (first) {
-      try { onActive(true); } catch (_) { /* 轮询启动失败不影响打开应用 */ }
+      try { onActive(true); } catch (_) { /* a failed poll start does not affect opening the app */ }
     }
 
     const installed = store.getApps().map((a) => a && a.package).filter(Boolean);
@@ -935,7 +935,7 @@ class Runtime {
       pkg,
       installed,
       deep: !!(s.engine && s.engine.deepTrim),
-      // App 刚 am start 完，此刻清后台可能误伤正在进前台的进程；清理放到 endApp
+      // The app just finished am start, and clearing the background now could hit a process entering the foreground; leave clearing to endApp
       killBackground: false,
     });
     if (plan.commands.length) {
@@ -946,9 +946,9 @@ class Runtime {
   }
 
   /**
-   * 关掉一个应用窗口：停掉它的进程；如果是最后一个窗口，让容器进入
-   * 「常驻但几乎不耗资源」的停放状态（清后台 + Android idle + qemu 降优先级）。
-   * 不关机、不删 AVD —— 下次点开还是秒进。
+   * Close an app window: stop its process; if it was the last window, put the container into
+   * a "resident but nearly free" parked state (clear background + Android idle + lower qemu priority).
+   * No shutdown, no AVD deletion - the next tap is still instant.
    */
   async endApp(pkg, { onIdle = () => {} } = {}) {
     this._activeApps.delete(pkg);
@@ -958,11 +958,11 @@ class Runtime {
       const s = this.settings;
       const cmds = container.buildIdleCommands({ deep: !!(s.engine && s.engine.deepTrim) });
       await this.client().shell(cmds.join(' ; '), { timeout: 15000 }).catch(() => '');
-      // game 模式下即使暂时没有应用窗口也保持高优先级，
-      // 否则下次点开要重新提权、首个输入会有明显延迟。
+      // In game mode keep the high priority even with no app window for now,
+      // otherwise the next tap must raise it again and the first input lags noticeably.
       const keepHigh = (s.engine && s.engine.priorityMode) === 'game';
       await this.emulator.setPriority(keepHigh ? 'normal' : 'idle').catch(() => {});
-      // 现在最空闲：把内存状态存成快照，下次开机走恢复而不是冷启动
+      // Now at its most idle: save the memory state as a snapshot so the next boot restores instead of cold-booting
       this._armSnapshotSave(8000);
       try { onIdle(true); } catch (_) { /* ignore */ }
       this.log('Container parked (Android stays resident, 0 app processes, qemu at lowest priority)');
@@ -973,7 +973,7 @@ class Runtime {
   get activeApps() { return [...this._activeApps]; }
   get containerIdle() { return this._activeApps.size === 0; }
 
-  /** 供设置页切换「深度裁剪」时恢复被禁用的系统包 */
+  /** Lets the settings page restore disabled system packages when "deep trim" is switched off */
   async restoreSystemApps() {
     const cmds = container.buildRestoreCommands();
     await this.client().shell(cmds.join(' ; '), { timeout: 20000 }).catch(() => '');
@@ -982,7 +982,7 @@ class Runtime {
 
   setGuestPriority(level) { return this.emulator.setPriority(level); }
 
-  // ---------------- 空闲回收 ----------------
+  // ---------------- idle reclaim ----------------
 
   startWatchdog() {
     if (this._watchdog) return;
@@ -990,8 +990,8 @@ class Runtime {
       const s = this.settings;
       const limit = (s.engine.idleShutdownMinutes || 0) * 60000;
       if (!limit) return;
-      // 接管来的模拟器没有本地 proc 句柄，vmRunning 会是 false：
-      // 以前这里直接 return，导致容器永不回收。改成同时看 adb 是否在线。
+      // An adopted emulator has no local proc handle, so vmRunning is false:
+      // it used to return here, so the container was never reclaimed. Now adb online is checked as well.
       if (!this.vmRunning) {
         const online = await this.client().isOnline().catch(() => false);
         if (!online) return;
@@ -1009,7 +1009,7 @@ class Runtime {
 
   get vmRunning() { return this.emulator.running() || !!(this.vmProc && !this.vmProc.killed); }
 
-  // ---------------- 诊断 / 瘦身（供 UI 调用） ----------------
+  // ---------------- diagnostics / slimming (called by the UI) ----------------
 
   async diagnostics() {
     const env = this.provisioner.paths();
@@ -1020,9 +1020,9 @@ class Runtime {
       emulatorVersion: checked.emulator.version || '',
       diskMB: doctor.freeDiskMB(store.DATA_DIR),
     });
-    // 内存里的 attempts 只在本次会话有效；用户重启后再导出报告时它是空的。
-    // 这时改用上次落盘的失败记录，并把 emulator.log 的尾部带上 —— 否则报告
-    // 只有一句 UNKNOWN，看不到真正原因（issue #20/#25 都栽在这里）。
+    // The in-memory attempts are valid for this session only and are empty when a report is exported after a restart.
+    // So fall back to the last failure record on disk and append the tail of emulator.log - otherwise the report
+    // holds a single UNKNOWN line with no real cause (issues #20/#25 both stalled here).
     const persisted = this.emulator.lastFailure ? this.emulator.lastFailure() : null;
     const liveAttempts = this.emulator.attempts || [];
     const attempts = liveAttempts.length ? liveAttempts : ((persisted && persisted.attempts) || []);
@@ -1051,10 +1051,10 @@ class Runtime {
   usage() { return require('./layers').summary(this.provisioner.paths().root); }
 
   /**
-   * 回收运行时里的旧镜像 / 旧 AVD / 锁文件 / 快照。
-   * 之前「点清理却清不掉」的根因：运行时正在跑时 keepSnapshots 把当前 AVD 的
-   * 快速启动快照（≈几 GB 的 ram.img）排除掉了，单 AVD 环境下几乎没有可清项。
-   * 现在调用方可以显式传 includeSnapshots：先停运行时再裁，快照就能真正回收。
+   * Reclaim old images / old AVDs / lock files / snapshots in the runtime.
+   * Root cause of "click clean but nothing is cleaned": with the runtime running, keepSnapshots excluded the current AVD's
+   * quickboot snapshot (a multi-GB ram.img), leaving almost nothing to clean in a single-AVD setup.
+   * Callers can now pass includeSnapshots explicitly: stop the runtime, then trim, and snapshots are really reclaimed.
    */
   async cleanup({ apply = false, aggressive = false, includeSnapshots = false } = {}) {
     let stoppedVm = false;
@@ -1065,16 +1065,16 @@ class Runtime {
     const report = require('./layers').prune(this.provisioner.paths().root, {
       apply, aggressive, keepSnapshots: !includeSnapshots && this.vmRunning,
     });
-    // 预览阶段若停了机，给用户一个提示：清完可手动重启运行时
+    // If the preview phase stopped the VM, tell the user: the runtime can be restarted manually after cleaning
     return { ...report, apply, stoppedVm };
   }
 
   /**
-   * 彻底重置安卓数据（清空 /data 用户分区 + 已装应用 + 快速启动快照），
-   * 把 AVD 还原成「刚装好系统、没有任何第三方 app」的干净状态。
-   * 这一项会真实删除 8–16GB 的用户数据镜像，必须二次确认（UI 负责），且只动
-   * 当前活动 AVD（apkstart.avd），不动只读基础镜像、不动其它 AVD。
-   * 保留 config.ini / hardware-qemu.ini，AVD 仍有效，下次点开应用会重新冷启动建数据。
+   * Fully reset Android data (wipe the /data user partition + installed apps + quickboot snapshots),
+   * restoring the AVD to "freshly installed system with no third-party app".
+   * This really deletes an 8-16GB user data image, so it needs double confirmation (the UI owns that) and touches only
+   * the active AVD (apkstart.avd), never the read-only base image or other AVDs.
+   * config.ini / hardware-qemu.ini are kept, so the AVD stays valid and the next tap cold-boots to rebuild data.
    * @returns {{ok:boolean, reclaimed:number, avdDir:string, error?:string}}
    */
   async resetAndroidData() {
@@ -1087,10 +1087,10 @@ class Runtime {
       if (fs.existsSync(avdDir)) {
         for (const e of fs.readdirSync(avdDir, { withFileTypes: true })) {
           const p = path.join(avdDir, e.name);
-          // 删除：用户数据镜像（含 qcow2 差量 + 基址）、快速启动快照、残留锁文件/锁目录。
-          // 保留：config.ini / hardware-qemu.ini / AVD.conf / cache.img / encryptionkey* / initrd /
-          //       modem_simulator / 各类 *.ini / *.txt / *.cache —— 它们是 AVD 的身份与基础设施，
-          //       删了 AVD 直接失效或下次开机异常。下次点开应用，模拟器会按 -wipe-data 语义重建 /data。
+          // Delete: the user data image (qcow2 delta + backing file), quickboot snapshots, leftover lock files/directories.
+          // Keep: config.ini / hardware-qemu.ini / AVD.conf / cache.img / encryptionkey* / initrd /
+          //       modem_simulator / the various *.ini / *.txt / *.cache - they are the AVD's identity and infrastructure,
+          //       and deleting them invalidates the AVD or breaks the next boot. The next tap rebuilds /data as -wipe-data would.
           const isUserdata = /^userdata(-qemu)?(-[0-9]+)?\.img(\.qcow2)?$/.test(e.name)
             || /^userdata\.img(\.qcow2)?\.\d+$/.test(e.name);
           const isSnapshot = /^snapshots(\.stale-\d+)?$/.test(e.name);
@@ -1107,11 +1107,11 @@ class Runtime {
               fs.rmSync(p, { force: true });
               reclaimed += s;
             }
-          } catch (_) { /* 占用中的暂跳，下次再清 */ }
+          } catch (_) { /* busy: skip for now and clean next time */ }
         }
       }
-      // 用户数据镜像被删后，用户侧「已安装 app」的记录也要清掉，
-      // 否则桌面/启动器还显示着其实已不存在的 app。
+      // Once the user data image is deleted, the user-side "installed apps" records must be cleared too,
+      // or the desktop/launcher keeps listing apps that no longer exist.
       try { store.saveApps([]); } catch (_) { /* ignore */ }
       return { ok: true, reclaimed, avdDir };
     } catch (e) {
@@ -1120,12 +1120,12 @@ class Runtime {
   }
 
   /**
-   * 等待虚拟机联网。
+   * Wait for the VM to get network.
    *
-   * 实测：`sys.boot_completed` 只代表系统起来了，Wi-Fi 关联 + DHCP 还要再等
-   * 十几秒到一分多钟才会拿到 10.0.2.16。红果这类应用一进去就拉首页数据，
-   * 没网时页面渲染成一整块黑底（隐私弹窗是本地页面所以正常显示），
-   * 用户看到的就是「点同意并继续之后一直黑屏」。所以拉起应用前先等网络就绪。
+   * Measured: `sys.boot_completed` only means the system is up; Wi-Fi association + DHCP still take another
+   * dozen seconds to a minute to get 10.0.2.16. Apps like Hongguo fetch the home feed immediately,
+   * and with no network the page renders as a solid black area (the privacy dialog is local, so it shows fine),
+   * so users see "a black screen forever after tapping agree and continue". So wait for the network before launching apps.
    *
    * @returns {Promise<{ok:boolean,reason:string,ip?:string,gateway?:string}>}
    */
@@ -1137,8 +1137,8 @@ class Runtime {
     while (Date.now() - t0 < timeoutMs) {
       const online = await this.client().isOnline().catch(() => false);
       if (!online) {
-        // 刚重启的虚拟机会有一段时间连 adb 都还没上线，不能一看到 offline 就放弃
-        // （之前就是这样：重置数据后立刻返回 device-offline，判定「修复失败」）。
+        // A freshly restarted VM has a window where even adb is not up; do not give up on the first offline
+        // (as before: right after a data reset it returned device-offline and declared the repair failed).
         if (!offlineSince) offlineSince = Date.now();
         if (Date.now() - offlineSince > 45000) return { ok: false, reason: 'device-offline' };
       } else {
@@ -1158,23 +1158,23 @@ class Runtime {
   }
 
   /**
-   * 修复「安卓虚拟机没有网络」。
-   * 绝大多数情况只是 Wi-Fi 关联比开机完成慢，重启并等一会儿就能好，
-   * **不需要**清掉用户数据；只有在等待超时后才提示用户走「重置安卓数据」。
+   * Repair "the Android VM has no network".
+   * In most cases Wi-Fi association simply lags boot completion and a restart plus a wait fixes it;
+   * user data need **not** be wiped; "reset Android data" is suggested only after the wait times out.
    *
    * @returns {Promise<{ok:boolean, network?:object, boot?:boolean, error?:string}>}
    */
   /**
-   * 确保虚拟机联网：先等，等不到就冷启动一次（绕开可能「没网」的快照）再等。
-   * 这是「红果点同意后黑屏」的根治手段：应用一定要在网络就绪后才启动。
+   * Ensure the VM has network: wait first, then cold-boot once (bypassing a possibly "offline" snapshot) and wait again.
+   * This cures "Hongguo goes black after tapping agree": apps must start only once the network is ready.
    *
    * @returns {Promise<{ok:boolean,reason?:string,ip?:string,gateway?:string}>}
    */
   async ensureNetwork({ onLog = () => {}, firstWaitMs = 25000, secondWaitMs = 90000 } = {}) {
     let net = await this.waitForNetwork({ onLog, timeoutMs: firstWaitMs });
     if (net && net.ok) return net;
-    // 冷启动很贵（几十秒），一个进程里只做一次：否则每次点开应用都要重来一遍，
-    // 用户感受到的就是「点开要等好几分钟」。
+    // A cold boot is expensive (tens of seconds), so do it once per process: otherwise every tap repeats it
+    // and the user experiences "minutes of waiting after a tap".
     if (this._netColdBootTried) return net;
     this._netColdBootTried = true;
     onLog('Network still not ready; cold-booting the VM once (without snapshot) and retrying…');
@@ -1188,25 +1188,25 @@ class Runtime {
     }
     net = await this.waitForNetwork({ onLog, timeoutMs: secondWaitMs });
     if (net && net.ok) {
-      // 网络正常后立刻存快照，下次恢复时网卡状态一起还原
+      // Save a snapshot as soon as the network is good so the next restore brings the NIC state back too
       try { await this.emulator.saveSnapshotNow(this.adbPath(), { timeout: 90000 }); } catch (_) { /* ignore */ }
     }
     return net;
   }
 
   /**
-   * 修复「安卓虚拟机没有网络」。
-   * 顺序：冷启动（不动数据）→ 等网络 → 还不行才重置数据（会丢应用内数据）。
+   * Repair "the Android VM has no network".
+   * Order: cold boot (leaving data alone) -> wait for network -> reset data only if that fails (in-app data is lost).
    *
    * @returns {Promise<{ok:boolean, network?:object, boot?:boolean, wiped?:boolean, error?:string}>}
    */
   async repairNetwork({ onLog = () => {} } = {}) {
     try {
-      // 直接重置数据：这是实测唯一稳定能让这个镜像联网的办法。
-      // （先冷启动再等 3 分钟只是白等 —— 已有用户数据上的冷启动根本连不上 Wi-Fi。）
+      // Reset data directly: measured as the only reliable way to get this image online.
+      // (Cold booting and waiting 3 minutes is a waste - a cold boot on existing user data never joins Wi-Fi.)
       onLog('Repairing VM networking: resetting Android data and rebooting (the app list is kept and apps reinstall when opened)…');
       if (this.vmRunning) await this.stop({ graceful: false }).catch(() => {});
-      // 给上一次的 qemu / netsimd 一点时间退干净，否则 -wipe-data 会撞 AVD 锁
+      // Give the previous qemu / netsimd time to exit cleanly, or -wipe-data hits the AVD lock
       await new Promise((r) => setTimeout(r, 2500));
       this.emulator.forceWipeOnNextStart();
       const boot = await this.ensure({ onLog });
@@ -1215,8 +1215,8 @@ class Runtime {
       }
       const network = await this.waitForNetwork({ onLog, timeoutMs: 240000 });
       if (network && network.ok) {
-        // 立刻把「网络正常」的状态存成快照：下次恢复时网卡状态一起还原，
-        // 否则关掉再开又会回到没网状态。
+        // Save the "network is good" state as a snapshot at once, so the next restore brings the NIC state back,
+        // or closing and reopening returns to a state with no network.
         try { await this.emulator.saveSnapshotNow(this.adbPath(), { timeout: 90000 }); } catch (_) { /* ignore */ }
         onLog(`Network restored (${network.ip || ''} gateway ${network.gateway || 'reachable'}); a working snapshot was saved.`);
       } else {
@@ -1232,11 +1232,11 @@ class Runtime {
     if (this._watchdog) clearInterval(this._watchdog);
     if (this._client && this._client.disposeInput) this._client.disposeInput();
     this.emulator.cancelSnapshotSave();
-    // 这里【绝对不能】强杀 qemu：
-    //  1) 强杀会把正在写盘的 quickboot 快照截断，只留下几 GB 的 ram.img 空壳，
-    //     下次开机加载失败 → 全量冷启动，这就是「每次打开都要等两分钟」的直接原因；
-    //  2) 留着它，下次打开 ApkStart 可以直接接管，点应用秒开（WSA / 应用宝电脑版同款行为）。
-    // 卸载时另走一条路（app:removeSelf 会显式清理进程）。
+    // qemu must **never** be force-killed here:
+    //  1) it truncates a quickboot snapshot being written, leaving a multi-GB ram.img shell,
+    //     which fails to load next boot -> a full cold boot, the direct cause of "two minutes on every open";
+    //  2) leaving it lets the next ApkStart adopt it and open apps instantly (same behaviour as WSA / Tencent's PC store).
+    // Uninstall takes another path (app:removeSelf explicitly cleans up processes).
     if (this.vmProc) {
       try { this.vmProc.kill(); } catch (_) { /* ignore */ }
       this.vmProc = null;

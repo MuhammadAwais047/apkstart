@@ -1,9 +1,9 @@
 'use strict';
 /**
- * 运行时自举（Provisioning）
+ * Runtime provisioning
  *
- * ApkStart 不依赖任何第三方模拟器：adb、QEMU、系统镜像全部由自己下载/校验/管理。
- * 所有运行时文件都放在 %APPDATA%\apkstart\runtime 下，保证在任何安装位置都可写。
+ * ApkStart depends on no third-party emulator: adb, QEMU and system images are all downloaded, verified and managed by itself.
+ * All runtime files live under %APPDATA%\apkstart\runtime so they stay writable from any install location.
  */
 const fs = require('fs');
 const path = require('path');
@@ -26,20 +26,20 @@ const SOURCES = {
   qemuFallback: [
     'https://qemu.weilnetz.de/w64/qemu-w64-setup-20260811.exe',
   ],
-  // Google 官方 SDK 索引：emulator 与系统镜像的真实地址从这里动态解析，不写死版本号
+  // Google's official SDK index: the real emulator and system image URLs are resolved here dynamically, with no hardcoded versions
   sdkIndex: 'https://dl.google.com/android/repository/repository2-3.xml',
   sysImgIndexes: [
     'https://dl.google.com/android/repository/sys-img/android/sys-img2-3.xml',
     'https://dl.google.com/android/repository/sys-img/google_apis/sys-img2-3.xml',
   ],
   aehdFallback: 'https://dl.google.com/android/repository/aehd-windows_v2.2.zip',
-  // 兜底：索引不可用时直接用的已知版本
+  // Fallback: known versions used directly when the index is unavailable
   emulatorFallback: 'https://dl.google.com/android/repository/emulator-windows_x64-16847572.zip',
   sysimgFallback: 'https://dl.google.com/android/repository/sys-img/google_apis_playstore/x86_64-34_r14.zip',
-  // ARM 兼容镜像（Google Play 版，内置 native bridge）
+  // ARM compatibility image (Google Play edition with a built-in native bridge)
   playImgIndex: 'https://dl.google.com/android/repository/sys-img/google_apis_playstore/sys-img2-3.xml',
   playImgFallback: 'https://dl.google.com/android/repository/sys-img/google_apis_playstore/x86_64-34_r14.zip',
-  // Android-x86 9.0-r2（x86_64）：仅在用户已自备 ISO 时使用
+  // Android-x86 9.0-r2 (x86_64): used only when the user supplies their own ISO
   iso: [
     'https://master.dl.sourceforge.net/project/android-x86/Release%209.0/android-x86_64-9.0-r2.iso?viasf=1',
     'https://nchc.dl.sourceforge.net/project/android-x86/Release%209.0/android-x86_64-9.0-r2.iso',
@@ -47,23 +47,23 @@ const SOURCES = {
     'https://downloads.sourceforge.net/project/android-x86/Release%209.0/android-x86_64-9.0-r2.iso',
   ],
   isoSizeHint: 900 * 1024 * 1024,
-  // 轻量版（不带运行时）从这里拿「运行时整包」：本项目自己的 GitHub Release。
-  // 以前轻量版要从 dl.google.com 分别下 emulator / 系统镜像，国内网络经常
-  // 卡在几十 KB/s 甚至直接 404；改成整包 + 本项目 GitHub 之后，下载源和更新源
-  // 是同一个地方，出了问题也只需要在一个地方修。
+  // The slim edition (no runtime) gets the "runtime bundle" from this project's own GitHub Release.
+  // It used to download the emulator / system images separately from dl.google.com, and networks in mainland China often
+  // crawled at tens of KB/s or hit a plain 404; with a bundle on this project's GitHub, download and update sources
+  // are one place, and a problem only ever needs fixing in one place.
   ghReleaseApi: 'https://api.github.com/repos/RoutineMiku/apkstart/releases',
   ghReleasePage: 'https://github.com/RoutineMiku/apkstart/releases',
-  // 同内容的 Gitee 镜像：国内直连 api.github.com 常常几十秒才响应，Gitee 一般几百毫秒。
-  // 两边都问一次，谁先给出「带运行时整包的最高版本」就用谁。
+  // A Gitee mirror of the same content: api.github.com often takes tens of seconds from mainland China, Gitee a few hundred milliseconds.
+  // Both are asked once; whichever offers the highest version with a runtime bundle wins.
   giteeReleaseApi: 'https://gitee.com/api/v5/repos/daily-miku/apkstart/releases',
   giteeReleasePage: 'https://gitee.com/daily-miku/apkstart/releases',
 };
 
 /**
- * SDK 索引里的 <url> 是相对路径，基准目录各不相同：
+ * The <url> entries in SDK indexes are relative paths with different base directories:
  *   repository2-3.xml      → https://dl.google.com/android/repository/
  *   sys-img/android/*.xml  → https://dl.google.com/android/repository/sys-img/android/
- * 所以基准目录一律取「索引文件自身所在目录」。此前直接拿文件名当 URL 会抛 Invalid URL。
+ * So the base is always the index file's own directory. Taking the bare filename as a URL used to throw Invalid URL.
  */
 const REPO_BASE = 'https://dl.google.com/android/repository/';
 
@@ -81,13 +81,13 @@ function absUrl(u, base = REPO_BASE) {
 }
 
 /**
- * 只保留一份「通用基础镜像」。
- * 旧版默认 AOSP API30 + 可选 API34 Play 兼容镜像，导致：
- *   - 用户装国产 ARM 应用时必然失败，还要手动切镜像（实用门槛）；
- *   - 两份镜像各 0.6~3GB，运行时目录动辄十几 GB；
- *   - 切换镜像要 wipe-data，已装应用全丢。
- * 现在统一为 Android 14 Google Play x86_64：x86 应用、ARM 应用、GMS 都能跑，
- * 全机只存一份只读基础层（容器式共享），按需下载一次即可。
+ * Keep exactly one "generic base image".
+ * The old default was AOSP API30 plus an optional API34 Play compatibility image, which meant:
+ *   - domestic ARM apps always failed to install and users had to switch images by hand (a usability wall);
+ *   - two images of 0.6-3GB each pushed the runtime directory past ten gigabytes;
+ *   - switching images required wipe-data, losing every installed app.
+ * It is now a single Android 14 Google Play x86_64: x86 apps, ARM apps and GMS all run,
+ * with one read-only base layer on disk (container-style sharing) downloaded once on demand.
  */
 const PLAY_SYSIMG = { api: '34', tag: 'google_apis_playstore', abi: 'x86_64' };
 const DEFAULT_SYSIMG = PLAY_SYSIMG;
@@ -115,11 +115,11 @@ function fileSize(p) {
 }
 
 /**
- * 下载完的完整性检查。不通过就**删掉这个不完整文件**。
+ * Post-download integrity check. On failure the incomplete file is **deleted**.
  *
- * 以前这里只抛错、不删文件，于是 tmp 里永远留着一个半截 zip。下次进来
- * download() 看到已有文件就带 Range 续传 —— 若服务器/源变了，续传来的字节
- * 和前半截拼不上，又失败、又留半截……用户看到的就是「一直重复下载」。
+ * It used to throw without deleting, so tmp kept a half zip forever. Next time in,
+ * download() saw the file and resumed with Range - and if the server/source changed, the resumed bytes
+ * did not splice onto the first half, failing again and leaving another half ... which users saw as "downloading forever".
  */
 function assertComplete(file, minBytes, label) {
   const size = fileSize(file);
@@ -129,16 +129,16 @@ function assertComplete(file, minBytes, label) {
 }
 
 /**
- * 环境探测结果的落盘缓存。
+ * On-disk cache of environment probe results.
  *
- * `emulator -version` 与 `emulator -accel-check` 每次都要新起一个 emulator 进程，
- * 在 Windows 上实测 1~3 秒；而这两项在「引擎/驱动没变」时结果恒定。
- * 以前只在内存里缓存 30 秒，等于每次冷启动都要重付一遍，而且这几秒正好卡在
- * 用户点开应用的那一刻。这里按「exe 大小+修改时间 + AEHD 驱动时间 + WHPX 组件」
- * 做指纹落到 %APPDATA%，软硬件一换自动失效。
+ * `emulator -version` and `emulator -accel-check` each start a new emulator process,
+ * measured at 1-3 seconds on Windows, while both results are constant as long as the engine/driver do not change.
+ * They used to be cached in memory for 30 seconds only, so every cold start paid again, and those seconds landed exactly
+ * when the user taps an app. Here a fingerprint of (exe size + mtime + AEHD driver time + WHPX component)
+ * is written to %APPDATA% and invalidates automatically when hardware or software changes.
  */
 const ENV_CACHE_TTL = 6 * 60 * 60 * 1000;
-const ENV_CACHE_NEG_TTL = 10 * 60 * 1000; // 加速「不可用」只信 10 分钟：用户可能刚去开了虚拟化
+const ENV_CACHE_NEG_TTL = 10 * 60 * 1000; // trust "acceleration unavailable" for 10 minutes only: the user may have just enabled virtualisation
 
 function envCacheFile() {
   return path.join(store.DATA_DIR, 'cache', 'env.json');
@@ -159,12 +159,12 @@ class Provisioner {
     this._sources = new Sources(() => store.getSettings());
   }
 
-  /** 双源/镜像的统一入口（测速缓存也在这里，多个组件共用一份） */
+  /** Unified entry for both sources/mirrors (the speed cache lives here too, shared by several components) */
   get sources() {
     return this._sources;
   }
 
-  /** 缓存指纹：引擎文件与加速驱动任一变化就换 key */
+  /** Cache fingerprint: the key changes whenever the engine files or the acceleration driver change */
   _envKey(exe) {
     const aehd = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'aehd.sys');
     return [
@@ -187,21 +187,21 @@ class Provisioner {
     try {
       const key = this._envKey(exe);
       let cur = {};
-      try { cur = JSON.parse(fs.readFileSync(envCacheFile(), 'utf8')) || {}; } catch (_) { /* 首次 */ }
+      try { cur = JSON.parse(fs.readFileSync(envCacheFile(), 'utf8')) || {}; } catch (_) { /* first run */ }
       const base = cur.key === key ? cur : { key, version: null, accel: null, accelAt: 0 };
       const next = { ...base, ...patch, key, at: Date.now() };
       fs.mkdirSync(path.dirname(envCacheFile()), { recursive: true });
       fs.writeFileSync(envCacheFile(), JSON.stringify(next));
-    } catch (_) { /* 缓存写不进去不影响主流程 */ }
+    } catch (_) { /* an unwritable cache does not affect the main flow */ }
   }
 
-  /** 开机失败（加速/镜像类问题）时调用：下次启动重新探测，避免一直用错的结论 */
+  /** Called after a failed boot (acceleration/image issues): re-probe next start so a wrong conclusion is not reused */
   invalidateEnvCache() {
     this._cache = { adbVersion: '', qemuVersion: '' };
     try { fs.rmSync(envCacheFile(), { force: true }); } catch (_) { /* ignore */ }
   }
 
-  // ---------------- 路径 ----------------
+  // ---------------- paths ----------------
 
   get root() {
     const r = store.getSettings().runtime.dir;
@@ -213,28 +213,28 @@ class Provisioner {
     const sysTag = DEFAULT_SYSIMG.tag;
     const sysApi = DEFAULT_SYSIMG.api;
     const sysAbi = DEFAULT_SYSIMG.abi;
-    // AVD（含用户数据、已装应用、quickboot 快照）必须落在可写且不会被清理的地方。
-    // 单文件发行版的运行时是随包解压到临时目录的，把 AVD 放进去等于每次退出都丢应用。
-    // 只要运行时目录不在 %APPDATA% 里，就把 AVD 固定指到用户数据目录。
-    // 另外：允许在设置里单独指定「安卓数据目录」——它才是真正吃盘的地方
-    // （6~24GB 数据分区 + 2~3GB 快照），只挪运行时、不挪它，C 盘一样会满。
+    // The AVD (user data, installed apps, quickboot snapshots) must live somewhere writable that is never cleaned.
+    // In the single-file edition the runtime unpacks to a temporary directory, so an AVD there loses apps on every exit.
+    // Whenever the runtime directory is outside %APPDATA%, the AVD is pinned to the user data directory.
+    // Settings can also set a separate "Android data directory" - that is what really consumes disk
+    // (a 6-24GB data partition + a 2-3GB snapshot), so moving only the runtime leaves C: filling up anyway.
     const explicitAvd = String(store.getSettings().runtime.avdDir || '').trim();
     const writable = explicitAvd || path.join(store.DATA_DIR, 'avd');
     const insideData = root.toLowerCase().startsWith(store.DATA_DIR.toLowerCase());
-    // 系统镜像放哪儿：**运行时目录优先**。
-    // 之前的顺序是「用户数据目录优先」，后果是——用户把运行时目录改到 D 盘省 C 盘空间，
-    // 1.4GB 的整包解到 D 盘以后，materializeImages 又把 3.3GB 的 system.img 展开回
-    // C://Users//...//AppData//Roaming//apkstart//system-images，C 盘照样被吃掉，而且
-    // 同一套镜像在两处各存一份（实测 1.2GB + 3.3GB 并存）。
-    // 现在：运行时目录里已经有 system-images（整包解压的产物）就用它；
-    // 没有才回退到用户数据目录（老版本、单文件发行版都是这种布局）。
+    // Where system images go: **the runtime directory wins**.
+    // The old order preferred the user data directory, so moving the runtime to D: to save C: meant
+    // the 1.4GB bundle unpacked to D: and then materializeImages expanded the 3.3GB system.img back into
+    // C://Users//...//AppData//Roaming//apkstart//system-images, eating C: all the same, with
+    // the same images stored twice (measured: 1.2GB and 3.3GB side by side).
+    // Now: if system-images already exists in the runtime directory (a bundle unpack product), use it;
+    // otherwise fall back to the user data directory (the layout of old versions and the single-file edition).
     const rootImg = path.join(root, 'system-images');
     const dataImg = path.join(store.DATA_DIR, 'system-images');
-    // 三种情况：
-    //  1) 运行时目录里已经有镜像（整包解压的产物）→ 用它的；
-    //  2) 老用户/单文件发行版把镜像放在用户数据目录 → 用那里的；
-    //  3) 全新安装（两处都没有）→ 落在运行时目录，因为用户数据目录可能是被
-    //     重定向过的临时目录（CI 组装运行时就是这种情况，写歪会直接校验失败）。
+    // Three cases:
+    //  1) the runtime directory already has images (a bundle unpack product) -> use them;
+    //  2) old installs / the single-file edition keep images in the user data directory -> use those;
+    //  3) a fresh install (neither location has them) -> use the runtime directory, because the user data directory may be a
+    //     redirected temporary directory (true when CI assembles the runtime, where a wrong path fails verification).
     const sysRoot = fs.existsSync(rootImg) ? rootImg : (fs.existsSync(dataImg) ? dataImg : rootImg);
     return {
       root,
@@ -243,7 +243,7 @@ class Provisioner {
       qemuImg: path.join(root, 'qemu', 'qemu-img.exe'),
       adbDir: path.join(root, 'platform-tools'),
       adbExe: path.join(root, 'platform-tools', 'adb.exe'),
-      // emulator 运行时（Google 官方）：root 同时充当 ANDROID_SDK_ROOT
+      // Emulator runtime (Google official): root doubles as ANDROID_SDK_ROOT
       emulatorDir: path.join(root, 'emulator'),
       emulatorExe: path.join(root, 'emulator', 'emulator.exe'),
       sysImgRoot: sysRoot,
@@ -267,19 +267,19 @@ class Provisioner {
   }
 
   /**
-   * 磁盘守卫：在下载 / 解压一份大体积组件之前，先确认目标盘有足够可用空间。
-   * 否则会下到一半把系统盘撑爆，或解压阶段直接失败（且残留半截文件）。
-   * 预留 1GB 缓冲：模拟器/镜像解压后还有快照、用户数据分区会持续膨胀。
-   * @param {string} component 组件名（决定所需空间估算）
-   * @param {string} targetDir 写入目录（据此定位所在盘）
+   * Disk guard: before downloading / extracting a large component, confirm the target drive has enough free space.
+   * Otherwise the system drive fills mid-download or extraction fails outright (leaving a partial file).
+   * Reserve a 1GB buffer: after extraction come snapshots, and the user data partition keeps growing.
+   * @param {string} component component name (drives the space estimate)
+   * @param {string} targetDir write directory (used to locate the drive)
    */
   async guardDisk(component, targetDir) {
     const need = {
       adb: 64, emulator: 600, sysimg: 1800, playimg: 1800, qemu: 320, iso: 1100, aehd: 64,
-      // 运行时整包：1.5GB 压缩包 + 展开后 ~3.3GB 镜像，峰值同时存在
+      // Runtime bundle: a 1.5GB archive plus ~3.3GB of expanded images, peaking together
       runtime: 5000,
     }[component] || 512; // MB
-    const buf = 1024; // 额外预留 1GB（快照 / 数据分区 / 解压中间文件）
+    const buf = 1024; // extra 1GB reserve (snapshots / data partition / extraction temp files)
     const dir = targetDir || this.root;
     const free = doctor.freeDiskMB(dir);
     if (free && free < need + buf) {
@@ -292,16 +292,16 @@ class Provisioner {
     return free;
   }
 
-  // ---------------- 环境检查 ----------------
+  // ---------------- environment checks ----------------
 
   async hypervisor() {
     if (this._hypervisor !== null) return this._hypervisor;
     if (!IS_WIN) { this._hypervisor = { whpx: false, note: 'Non-Windows platform' }; return this._hypervisor; }
-    // 只做毫秒级的文件检查。真正"WHPX 是否可用"由 emulator -accel-check 给出权威答案，
-    // 避免在这里拉起 PowerShell（冷启动 1-2 秒）拖慢每次状态轮询。
+    // Only millisecond-scale file checks here. Whether WHPX really works is answered authoritatively by emulator -accel-check,
+    // avoiding a PowerShell launch here (1-2 seconds cold) that would slow every status poll.
     const dll = fs.existsSync('C:\\Windows\\System32\\WinHvPlatform.dll');
     this._hypervisor = {
-      whpx: false,          // 由 emulatorAccel() 覆盖为真实值
+      whpx: false,          // overwritten with the real value by emulatorAccel()
       dll,
       hypervisorPresent: false,
       note: dll
@@ -312,7 +312,7 @@ class Provisioner {
   }
 
   async adbVersion() {
-    // 30s 缓存，避免状态轮询频繁拉起外部进程
+    // 30s cache, avoiding frequent external process launches during status polling
     if (this._adbCache && Date.now() - this._adbCache.at < 30000) return this._adbCache.value;
     const { adbExe, adbDir } = this.paths();
     const candidates = [adbExe, path.join(this.appRoot, 'tools', 'platform-tools', 'adb.exe')];
@@ -336,7 +336,7 @@ class Provisioner {
     const candidates = [
       p.qemuExe,
       store.getSettings().runtime.qemuPath,
-      'C:\\Program Files\\qemu\\qemu-system-x86_64.exe',   // winget 默认安装位置
+      'C:\\Program Files\\qemu\\qemu-system-x86_64.exe',   // the winget default install location
       path.join(this.appRoot, 'engine', 'qemu', 'qemu-system-x86_64.exe'),
     ].filter(Boolean);
     for (const c of candidates) {
@@ -353,7 +353,7 @@ class Provisioner {
     return this._qemuCache.value;
   }
 
-  /** 校验 ISO9660 主卷描述符（偏移 0x8001 处的 "CD001"），防止把错误页/半截文件当镜像 */
+  /** Validate the ISO9660 primary volume descriptor ("CD001" at offset 0x8001) so an error page or partial file is not taken as an image */
   inspectIso(file) {
     const size = fileSize(file);
     if (!size) return { ok: false, iso9660: false, size: 0, reason: 'Not downloaded' };
@@ -367,7 +367,7 @@ class Provisioner {
     } catch (_) { /* ignore */ }
 
     const iso9660 = magic === 'CD001';
-    // 用户导入的 raw/已装磁盘镜像不含 ISO 引导区，按尺寸放行
+    // A user-imported raw / installed disk image has no ISO boot area, so accept it by size
     const rawImage = !iso9660 && /\.(img|raw|qcow2)$/i.test(file) && size > MIN_SIZE.iso;
     const ok = size > MIN_SIZE.iso && (iso9660 || rawImage);
 
@@ -394,8 +394,8 @@ class Provisioner {
     const diskSize = fileSize(diskPath);
     const sysimg = this.systemImageInfo();
 
-    // 完整版（内置运行时）只带一份 API 34 Google Play 镜像，它同时是主镜像与兼容镜像；
-    // 不再依赖 compatImage 开关，避免「镜像明明在，却因为没勾开关而判定未部署」
+    // The full edition (bundled runtime) carries one API 34 Google Play image that serves as both primary and compatibility image;
+    // it no longer depends on a compatImage flag, avoiding "the image is there but judged undeployed because the flag is off"
     const compatReady = this.playImageInfo().ok;
     const emulatorReady = emulator.ok && (sysimg.ok || compatReady);
     const qemuReady = qemu.ok && diskSize > MIN_SIZE.disk;
@@ -472,10 +472,10 @@ class Provisioner {
   }
 
   /**
-   * 用自带的 ZIP 解析器解压（避免依赖系统解压工具）
-   * 大条目（GB 级 system.img）走流式，小条目整块读，避免撞 Node 的单 Buffer 上限。
+   * Extract with the built-in ZIP parser (no dependency on system unzip tools)
+   * Large entries (GB-sized system.img) stream, small ones read whole, avoiding Node's single-Buffer cap.
    */
-  // ---------------- 本项目 GitHub 的运行时整包（轻量版） ----------------
+  // ---------------- this project's GitHub runtime bundle (slim edition) ----------------
 
   async _fetchJson(url) {
     const text = await this._fetchText(url).catch(() => '');
@@ -483,11 +483,11 @@ class Provisioner {
   }
 
   /**
-   * 解析「运行时整包」的下载地址。
-   * 资产名约定：ApkStart-runtime-<tag>.zip（由 .github/workflows/release.yml 产出，
-   * 内容就是 build/runtime 的那一套：emulator/ + platform-tools/ + aehd/ + system-images/）。
-   * GitHub 与 Gitee 两边都扫一遍，取版本号最高的那个；找不到就抛错，让上层退回
-   * Google 官方分组件下载。
+   * Resolve the download URL of the "runtime bundle".
+   * Asset naming: ApkStart-runtime-<tag>.zip (produced by .github/workflows/release.yml,
+   * containing exactly build/runtime: emulator/ + platform-tools/ + aehd/ + system-images/).
+   * Both GitHub and Gitee are scanned and the highest version wins; if none is found it throws so the caller falls back
+   * to Google's per-component downloads.
    */
   async resolveRuntimePack() {
     const custom = String(store.getSettings().runtime.runtimePackUrl || '').trim();
@@ -499,7 +499,7 @@ class Provisioner {
     if (pref !== 'gitee') apis.push({ api: SOURCES.ghReleaseApi, page: SOURCES.ghReleasePage, name: 'GitHub' });
     if (pref !== 'github') apis.push({ api: SOURCES.giteeReleaseApi, page: SOURCES.giteeReleasePage, name: 'Gitee' });
 
-    // 并发问两边；任何一个失败都不影响另一个
+    // Ask both concurrently; one failing does not affect the other
     const lists = await Promise.all(apis.map(async (a) => {
       const j = await this._fetchJson(`${a.api}?per_page=15`).catch(() => null);
       return { ...a, list: Array.isArray(j) ? j : null };
@@ -532,12 +532,12 @@ class Provisioner {
   }
 
   /**
-   * 轻量版一键部署：从本项目 GitHub 下载运行时整包并解压。
-   * 系统镜像在包里是 .xz，首次开机时由 materializeImages() 展开（只做一次）。
+   * Slim-edition one-click setup: download the runtime bundle from this project's GitHub and unpack it.
+   * System images are .xz inside the bundle and materializeImages() expands them on first boot (once).
    */
   async installRuntimePack(onProgress = () => {}) {
     const p = this.ensureDirs();
-    // 先给一条进度：找版本 + 测速这一段没有字节数，不给提示用户会以为「卡死了」。
+    // Emit progress first: version lookup + speed test have no byte counts, and without a hint users think it is stuck.
     onProgress({ stage: 'download', message: 'Fetching runtime release info…', percent: 1 });
     const pack = await this.resolveRuntimePack();
     await this.guardDisk('runtime', p.root);
@@ -547,15 +547,15 @@ class Provisioner {
     const conn = Math.max(1, Math.min(16, Number(s.downloadConnections) || 8));
 
     onProgress({ stage: 'download', message: `Picking the fastest download source (${pack.from || 'GitHub'} · ${pack.tag})…`, percent: 1 });
-    // 候选 = 源站 + 镜像前缀。先各下一个 128KB 实测速度再决定用哪个：
-    // 「按域名猜」在实测里经常错 —— 同一个地址上午 30KB/s、晚上 5MB/s。
+    // Candidates = source plus mirror prefixes. Download 128KB from each to measure, then choose:
+    // guessing by hostname is often wrong - the same URL gave 30KB/s in the morning and 5MB/s at night.
     const urls = await this.sources
       .rank(this._downloadUrls(pack.url), { onProgress: (pp) => onProgress({ stage: 'download', message: pp.message, percent: 1 }) })
       .catch(() => this._downloadUrls(pack.url));
 
     onProgress({ stage: 'download', message: `Downloading the runtime (~1.5 GB, once, ${conn} threads)…`, percent: 2 });
-    // 分块并行（8 线程）比单流快得多：GitHub 对单连接限速很常见，单流实测只有
-    // 一两百 KB/s，8 线程能跑满本地带宽。中途断掉会退回单流续传。
+    // Parallel chunks (8 threads) beat a single stream: GitHub often throttles one connection, measured at only
+    // 100-200KB/s single, while 8 threads saturate local bandwidth. An interruption falls back to single-stream resume.
     await downloadMulti(urls, zip, {
       connections: conn,
       onProgress: (pr) => {
@@ -586,12 +586,12 @@ class Provisioner {
         name: pack.name, tag: pack.tag, at: new Date().toISOString(), from: pack.url,
       }));
       fs.rmSync(zip, { force: true });
-    } catch (_) { /* 标记写不进去不影响使用 */ }
+    } catch (_) { /* an unwritable marker does not affect use */ }
 
-    // 整包里的 system.img 是 .xz 压缩的（和完整版安装包一致）。这里立刻展开，
-    // 否则紧接着 checkEnv() 会认为「没装系统镜像」，又去 Google 下一套 1.4 GB。
-    // 展开失败必须让部署失败并带上原因：旧版这里 catch 成 0，用户看到进度
-    // 停在 99% 之后又跳回「改用官方源补齐」，白下一套 1.4GB。
+    // system.img inside the bundle is .xz compressed (as in the full installer). Expand it right away,
+    // or the very next checkEnv() concludes "no system image" and downloads another 1.4GB from Google.
+    // An extraction failure must fail the setup with a reason: the old version caught it as 0, so the progress
+    // stopped at 99% and then jumped back to "completing from official sources", wasting another 1.4GB download.
     onProgress({ stage: 'extract', message: 'Expanding the system image (~1 minute, once)…', percent: 99 });
     await this.materializeImages((m) => onProgress({ stage: 'extract', message: m, percent: 99 }));
 
@@ -600,17 +600,17 @@ class Provisioner {
   }
 
   /**
-   * 下载地址候选：直连优先，其次镜像前缀。
-   * 走 Sources 统一处理，好处是「自动镜像（ghfast / gh-proxy）」与用户自定义前缀
-   * 只在一个地方维护，且能和多线程下载共用同一份测速缓存。
+   * Download URL candidates: direct first, then mirror prefixes.
+   * Going through Sources means automatic mirrors (ghfast / gh-proxy) and user prefixes
+   * are maintained in one place and share one speed cache with multi-threaded downloads.
    */
   _downloadUrls(url) {
     return this.sources.candidates(url);
   }
 
   async extractZip(zipPath, destDir, opts = {}) {
-    // 大包（emulator / 系统镜像）走文件版：不把 1.5GB zip 整包读进内存，
-    // 低内存机器也能稳定解压；小包沿用内存版，速度更快。
+    // Large packages (emulator / system images) use the file-based path: a 1.5GB zip never enters memory,
+    // so low-memory machines still extract reliably; small packages keep the in-memory path, which is faster.
     const big = fileSize(zipPath) > 64 * 1024 * 1024;
     const zip = big ? new ZipFile(zipPath) : new ZipArchive(fs.readFileSync(zipPath));
     const STREAM_THRESHOLD = 64 * 1024 * 1024;
@@ -641,9 +641,9 @@ class Provisioner {
     return destDir;
   }
 
-  // ---------------- Emulator（Google 官方运行时） ----------------
+  // ---------------- Emulator (Google official runtime) ----------------
 
-  /** 抓取一段 XML 文本（带大小上限，索引文件约 400KB） */
+  /** Fetch an XML document (size-capped; an index file is about 400KB) */
   async _fetchText(url, limit = 2 * 1024 * 1024) {
     const { openStream } = require('./download');
     const res = await openStream(url);
@@ -655,7 +655,7 @@ class Provisioner {
     });
   }
 
-  /** 从 SDK 索引里动态解析最新的 Windows emulator 包地址 */
+  /** Resolve the latest Windows emulator package URL dynamically from the SDK index */
   async resolveEmulatorUrl() {
     const cached = store.getSettings().runtime.emulatorUrl;
     if (cached && cached.trim()) return absUrl(cached);
@@ -672,12 +672,12 @@ class Provisioner {
           return win;
         }
       }
-    } catch (_) { /* 落兜底 */ }
+    } catch (_) { /* fall back */ }
     this._cache.emulatorUrl = SOURCES.emulatorFallback;
     return SOURCES.emulatorFallback;
   }
 
-  /** 从 sys-img 索引里解析默认 AOSP 系统镜像地址 */
+  /** Resolve the default AOSP system image URL from the sys-img index */
   async resolveSysimgUrl() {
     const cached = store.getSettings().runtime.sysimgUrl;
     if (cached && cached.trim()) return absUrl(cached, baseOf(SOURCES.sysImgIndexes[0]));
@@ -698,7 +698,7 @@ class Provisioner {
             return this._cache.sysimgUrl;
           }
         }
-      } catch (_) { /* 换下一个索引 */ }
+      } catch (_) { /* try the next index */ }
     }
     this._cache.sysimgUrl = SOURCES.sysimgFallback;
     return SOURCES.sysimgFallback;
@@ -712,7 +712,7 @@ class Provisioner {
     const candidates = [p.emulatorExe, path.join(this.appRoot, 'engine', 'emulator', 'emulator.exe')];
     for (const c of candidates) {
       if (!fs.existsSync(c)) continue;
-      // 上一次会话探测过、且引擎文件没变：直接用落盘结果（省掉一次 1s+ 的进程拉起）
+      // Probed last session with unchanged engine files: use the on-disk result (saving a 1s+ process launch)
       const cached = this.envCacheGet(c);
       if (cached && cached.version && cached.version.ok && Date.now() - (cached.at || 0) < ENV_CACHE_TTL) {
         this._cache.emulatorVersion = cached.version;
@@ -734,26 +734,26 @@ class Provisioner {
   }
 
   /**
-   * 首次启动把随包带来的压缩镜像展开到用户目录（只做一次）。
-   * 单文件发行版里 system.img 是 .gz（3.1GB→580MB 左右），不展开模拟器没法用。
-   * 展开到 %APPDATA% 而不是包里：便携版的运行时目录每次启动都是新的临时目录，
-   * 放进去等于每次开机都重解压一遍。
+   * On first start, expand the compressed images shipped in the package into the user directory (once).
+   * In the single-file edition system.img is .gz (3.1GB -> about 580MB) and the emulator cannot use it unexpanded.
+   * Expand into %APPDATA%, not the package: the portable build's runtime directory is a new temp directory on every start,
+   * so putting them there means re-extracting on every start.
    */
   async materializeImages(onLog = () => {}) {
     const srcRoot = path.join(this.root, 'system-images');
-    // 展开目标必须和 paths().sysImgRoot 用同一套规则，否则会出现
-    // 「整包解到 D 盘、镜像又展开回 C 盘 APPDATA」的重复占用（实测 1.2GB + 3.3GB）。
+    // The expansion target must follow the same rules as paths().sysImgRoot, or we get
+    // "bundle unpacked to D:, images expanded back to C: APPDATA" duplication (measured: 1.2GB + 3.3GB).
     const destRoot = this.paths().sysImgRoot;
     const jobs = [];
-    const copies = []; // 压缩镜像之外的文件（kernel-ranchu / ramdisk / 未压缩 .img 等）必须一并落到展开目录
-    const found = new Map(); // dest -> job（同镜像 .xz/.gz 并存时优先 .xz）
+    const copies = []; // non-image files (kernel-ranchu / ramdisk / uncompressed .img etc.) must land in the expansion directory too
+    const found = new Map(); // dest -> job (prefer .xz when both .xz and .gz exist)
     const walk = (dir, rel = '') => {
       let entries = [];
       try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; }
       for (const e of entries) {
         const p = path.join(dir, e.name);
         if (e.isDirectory()) { walk(p, path.join(rel, e.name)); continue; }
-        // 支持 .img.xz（LZMA2，体积比 .gz 小 ~25%）和旧的 .img.gz
+        // Supports .img.xz (LZMA2, about 25% smaller than .gz) and the older .img.gz
         if (/\.img\.(xz|gz)$/i.test(e.name)) {
           const dest = path.join(destRoot, rel, e.name.replace(/\.img\.(xz|gz)$/i, '.img'));
           const job = { src: p, dest, xz: /\.xz$/i.test(e.name) };
@@ -768,10 +768,10 @@ class Provisioner {
     jobs.push(...found.values());
     if (!jobs.length && !copies.length) return 0;
 
-    // 先补齐非镜像文件（模拟器靠 kernel-ranchu 等定位/引导，缺了会报"还差系统镜像"）
+    // Copy non-image files first (the emulator locates/boots via kernel-ranchu etc., and missing ones report "system image missing")
     for (const c of copies) {
       try {
-        if (path.resolve(c.src) === path.resolve(c.dest)) continue;   // 原地展开，无需复制
+        if (path.resolve(c.src) === path.resolve(c.dest)) continue;   // already in place, no copy needed
         const have = fileSize(c.dest);
         if (have > 0 && have === fileSize(c.src)) continue;
         fs.mkdirSync(path.dirname(c.dest), { recursive: true });
@@ -783,14 +783,14 @@ class Provisioner {
     const failures = [];
     for (const j of jobs) {
       const have = fileSize(j.dest);
-      // 判断「已经展开过」不能只看 32MB：旧版没有 .part，被中断后可能留下
-      // 几百 MB 的半截镜像，阈值一过就被当成完成，开机时炸在系统镜像损坏上。
-      // 真实镜像解压后一定比压缩包大，所以「小于压缩包大小」= 必然没展开完。
+      // "Already expanded" cannot rely on 32MB: the old version had no .part and could leave
+      // a few hundred MB of partial image, counted as complete once past the threshold and blowing up on a corrupt image at boot.
+      // A real image is always larger expanded than compressed, so "smaller than the archive" means incomplete.
       const srcSize = fileSize(j.src);
       if (have > 32 * 1024 * 1024 && (srcSize <= 0 || have >= srcSize)) continue;
-      // 先解到 .part，成功后再改名：解压中途被打断（关程序 / 断电 / 磁盘满）
-      // 不会留下一个「看着像已完成」的半截 system.img，否则下次会跳过展开、
-      // 开机时死在镜像损坏上，用户只能删数据重来。
+      // Extract to .part and rename on success: an interruption (app closed / power loss / full disk)
+      // then never leaves a half system.img that looks complete, which would skip expansion next time
+      // and die on a corrupt image at boot, forcing the user to delete data and start over.
       const part = `${j.dest}.part`;
       try { fs.rmSync(part, { force: true }); } catch (_) { /* ignore */ }
       fs.mkdirSync(path.dirname(j.dest), { recursive: true });
@@ -800,10 +800,10 @@ class Provisioner {
         await new Promise((resolve, reject) => {
           const { pipeline, Readable } = require('stream');
           if (j.xz) {
-            // LZMA2 解压：必须直接引原生绑定 index.js。
-            // 包默认入口 main.js / xz.js 内部会 require('stream-polyfill.mjs')，
-            // Electron 的 Node 20 不支持 require(ESM) 会抛错；而 exports 又不允许
-            // 直接写 '@napi-rs/lzma/index.js'，所以用 require.resolve 定位目录后按文件路径引。
+            // LZMA2 decompression must load the native binding's index.js directly.
+            // The package's default entry (main.js / xz.js) requires('stream-polyfill.mjs') internally,
+            // and Electron's Node 20 does not support require(ESM) and throws; exports blocks a plain
+            // '@napi-rs/lzma/index.js', so locate the directory with require.resolve and require it by file path.
             const path0 = require('path');
             const lzmaDir = path0.dirname(require.resolve('@napi-rs/lzma'));
             const { xz } = require(path0.join(lzmaDir, 'index.js'));
@@ -823,8 +823,8 @@ class Provisioner {
         done += 1;
       } catch (e) {
         try { fs.rmSync(part, { force: true }); } catch (_) { /* ignore */ }
-        // 不能再静默吞掉：调用方（一键部署 / 开机）必须知道镜像没展开成功，
-        // 否则会「用官方源再下一套 1.4GB」或者直接开机失败。
+        // It must not be swallowed silently: the caller (one-click setup / boot) must know the images did not expand,
+        // or it downloads another 1.4GB from official sources or fails to boot outright.
         failures.push(`${path.basename(j.dest)}: ${e.message}`);
         onLog(`Failed to expand image: ${e.message}`);
       }
@@ -838,13 +838,13 @@ class Provisioner {
     return done;
   }
 
-  /** 系统镜像是否完整（system.img 是硬指标，缺失或过小都视为没下完） */
+  /** Whether the system image is complete (system.img is the hard check; missing or too small counts as incomplete) */
   systemImageInfo() {
     const p = this.paths();
     const roots = [p.sysImgRoot, path.join(this.root, 'system-images'), path.join(this.appRoot, 'engine', 'system-images')];
-    // 先在默认位置（API34 Play）找，再退到「随便哪套镜像」。
-    // 单文件发行版可能只带一套更小的 AOSP 镜像，写死 API34 会导致
-    // 镜像明明在包里却报"未下载"，用户被迫联网下载一套新的。
+    // Look in the default location (API34 Play) first, then accept any image set.
+    // The single-file edition may carry only a smaller AOSP image, and hardcoding API34 would
+    // report "not downloaded" while the image is in the package, forcing an online download of a new one.
     const preferred = [p.sysImgDir,
       path.join(this.appRoot, 'engine', 'system-images',
         `android-${DEFAULT_SYSIMG.api}`, DEFAULT_SYSIMG.tag, DEFAULT_SYSIMG.abi)];
@@ -884,11 +884,11 @@ class Provisioner {
   }
 
   /**
-   * 硬件加速状态。
-   * emulator 在 Windows 上支持两种加速：WHPX（系统功能，需重启）与 AEHD（Google 自家驱动，装完即用）。
+   * Hardware acceleration state.
+   * The emulator supports two accelerators on Windows: WHPX (a system feature needing a reboot) and AEHD (Google's own driver, usable right after install).
    */
   async emulatorAccel() {
-    // 状态轮询每几秒一次，而 -accel-check 要拉起一个 emulator 进程，必须缓存
+    // Status polls run every few seconds and -accel-check launches an emulator process, so results must be cached
     if (this._cache.accel && this._cache.accelAt && Date.now() - this._cache.accelAt < 30000) {
       return this._cache.accel;
     }
@@ -897,8 +897,8 @@ class Provisioner {
       : path.join(this.appRoot, 'engine', 'emulator', 'emulator.exe');
     if (!fs.existsSync(exe)) return { ok: false, kind: 'none', note: 'emulator not installed' };
 
-    // 落盘缓存：冷启动时不再为这一项拉起 emulator 进程。
-    // 「不可用」结论只信 10 分钟 —— 用户可能刚去开了虚拟化/装了 AEHD，要能立刻反映。
+    // On-disk cache: a cold start no longer launches an emulator process for this.
+    // "Unavailable" is trusted for 10 minutes only - the user may have just enabled virtualisation or installed AEHD and needs it reflected at once.
     const cached = this.envCacheGet(exe);
     if (cached && cached.accel) {
       const ttl = cached.accel.ok ? ENV_CACHE_TTL : ENV_CACHE_NEG_TTL;
@@ -922,9 +922,9 @@ class Provisioner {
       const kind = hasAehdFile && /aehd/i.test(text) ? 'aehd' : 'whpx';
       result = { ok: true, kind, note: kind === 'whpx' ? 'WHPX hardware acceleration enabled' : 'AEHD hardware acceleration enabled' };
     } else if (/can't find the emulator-check|corrupted tools installation/i.test(text) && hasAehdFile) {
-      // 部分精简运行时包会漏掉 emulator-check.exe，导致 -accel-check 无法给出结论。
-      // 此时只要 AEHD 驱动已安装，就按「可用」处理：启动时 emulator 自己会挂载驱动，
-      // 避免被误判成无加速而强行 -accel off（软件模拟在部分机器上会直接崩溃）。
+      // Some trimmed runtime packages omit emulator-check.exe, so -accel-check cannot conclude.
+      // Then, as long as the AEHD driver is installed, treat it as available: the emulator mounts the driver itself at start,
+      // avoiding a misjudged "no acceleration" that forces -accel off (software emulation crashes outright on some machines).
       result = { ok: true, kind: 'aehd', note: 'AEHD hardware acceleration enabled (emulator-check missing; judged by driver)' };
     } else if (hasAehdFile && /aehd/i.test(text) && !/ERROR_ACCESS_DENIED/i.test(text)) {
       result = { ok: true, kind: 'aehd', note: 'AEHD hardware acceleration enabled' };
@@ -946,7 +946,7 @@ class Provisioner {
     return result;
   }
 
-  /** 下载并安装 emulator（zip 顶层就是 emulator/，直接解到 SDK root） */
+  /** Download and install the emulator (the zip's top level is emulator/, extracted straight into the SDK root) */
   async installEmulator(onProgress = () => {}) {
     const p = this.ensureDirs();
     await this.guardDisk('emulator', p.root);
@@ -971,7 +971,7 @@ class Provisioner {
     await this.extractZip(zip, p.root);
     fs.rmSync(zip, { force: true });
 
-    // SDK root 必须同时具备 platform-tools，否则 emulator 拒绝启动
+    // The SDK root must also contain platform-tools, or the emulator refuses to start
     this.ensurePlatformTools();
 
     const v = await this.emulatorVersion();
@@ -981,7 +981,7 @@ class Provisioner {
     return v;
   }
 
-  /** emulator 要求 SDK root 下有 platform-tools 目录，否则直接 FATAL */
+  /** The emulator requires a platform-tools directory under the SDK root, or it goes FATAL */
   ensurePlatformTools() {
     const p = this.paths();
     fs.mkdirSync(p.adbDir, { recursive: true });
@@ -1007,13 +1007,13 @@ class Provisioner {
     return '';
   }
 
-  /** 只下载一份通用基础镜像（Android 14 Play x86_64），不再有「普通/兼容」两套 */
+  /** Download the single generic base image (Android 14 Play x86_64); the "normal/compat" pair is gone */
   async installSystemImage(onProgress = () => {}) {
     if (this.playImageInfo().ok) return this.playImageInfo();
     return this.installPlayImage(onProgress);
   }
 
-  /** ARM 兼容镜像（Google Play 版）是否已就位 */
+  /** Whether the ARM compatibility image (Google Play edition) is in place */
   playImageInfo() {
     const p = this.paths();
     const dir = path.join(p.sysImgRoot, `android-${PLAY_SYSIMG.api}`, PLAY_SYSIMG.tag, PLAY_SYSIMG.abi);
@@ -1024,7 +1024,7 @@ class Provisioner {
     return { ok: false, dir, size, note: size ? 'Image incomplete' : 'Not downloaded' };
   }
 
-  /** 解析 Google Play 版镜像地址（<url> 相对索引文件所在目录） */
+  /** Resolve the Google Play image URL (its <url> is relative to the index file's directory) */
   async resolvePlayUrl() {
     if (this._cache.playUrl) return this._cache.playUrl;
     try {
@@ -1040,12 +1040,12 @@ class Provisioner {
           return this._cache.playUrl;
         }
       }
-    } catch (_) { /* 落兜底 */ }
+    } catch (_) { /* fall back */ }
     this._cache.playUrl = SOURCES.playImgFallback;
     return this._cache.playUrl;
   }
 
-  /** 下载并安装 ARM 兼容镜像（Google Play 版，约 1.5GB） */
+  /** Download and install the ARM compatibility image (Google Play edition, about 1.5GB) */
   async installPlayImage(onProgress = () => {}) {
     const p = this.ensureDirs();
     await this.guardDisk('playimg', p.sysImgRoot);
@@ -1079,7 +1079,7 @@ class Provisioner {
 
     const info = this.playImageInfo();
     if (!info.ok) throw new Error('Verification failed after extracting the compatibility image');
-    // 旧版（API 30）兼容镜像不再使用，成功装好后清理腾空间
+    // The old (API 30) compatibility image is unused; clean it up after a successful install to free space
     for (const old of ['android-30']) {
       const legacy = path.join(p.sysImgRoot, old, 'google_apis_playstore');
       if (fs.existsSync(legacy)) fs.rmSync(legacy, { recursive: true, force: true });
@@ -1088,7 +1088,7 @@ class Provisioner {
     return info;
   }
 
-  /** 下载 AEHD 驱动（小文件）；安装需要管理员权限，交给引导流程 */
+  /** Download the AEHD driver (a small file); installing needs administrator rights and is left to the bootstrap flow */
   async installAehd(onProgress = () => {}) {
     const p = this.ensureDirs();
     await this.guardDisk('aehd', p.aehdDir);
@@ -1108,7 +1108,7 @@ class Provisioner {
 
   // ---------------- QEMU ----------------
 
-  /** 抓取官方目录里最新的安装包文件名（不写死版本号） */
+  /** Fetch the newest installer filename from the official directory (no hardcoded version) */
   async resolveQemuUrl() {
     const configured = store.getSettings().runtime.qemuUrl;
     if (configured && configured.trim()) return configured.trim();
@@ -1128,7 +1128,7 @@ class Provisioner {
         const f = files[0].file.replace(/^.*\//, '');
         return new URL(f, SOURCES.qemuIndex).href;
       }
-    } catch (_) { /* 落到备用源 */ }
+    } catch (_) { /* fall back to the alternate source */ }
     return SOURCES.qemuFallback[0];
   }
 
@@ -1154,7 +1154,7 @@ class Provisioner {
     assertComplete(setup, MIN_SIZE.qemu, 'The QEMU installer');
 
     onProgress({ stage: 'install', message: 'Installing QEMU (silent)…', percent: 96 });
-    // qemu-w64-setup 是 NSIS 安装器：/S 静默，/D 指定目录（必须最后且不加引号）
+    // qemu-w64-setup is an NSIS installer: /S silent, /D target directory (must come last and unquoted)
     const target = p.qemuDir;
     fs.mkdirSync(target, { recursive: true });
     await new Promise((resolve) => {
@@ -1174,7 +1174,7 @@ class Provisioner {
     return v;
   }
 
-  // ---------------- 系统镜像 ----------------
+  // ---------------- system images ----------------
 
   async downloadIso(onProgress = () => {}) {
     const p = this.ensureDirs();
@@ -1206,7 +1206,7 @@ class Provisioner {
     return { ...r, ...info };
   }
 
-  /** 校验用户导入的镜像/ISO */
+  /** Validate a user-imported image/ISO */
   inspectImage(file) {
     const size = fileSize(file);
     if (!size) throw new Error('The file does not exist or is empty');
@@ -1239,7 +1239,7 @@ class Provisioner {
     return { ok: true, ...info };
   }
 
-  // ---------------- 虚拟磁盘 ----------------
+  // ---------------- virtual disk ----------------
 
   async createDisk(sizeGB = 24, onProgress = () => {}) {
     const p = this.ensureDirs();
@@ -1264,7 +1264,7 @@ class Provisioner {
     return { ok: true, path: dest, size: fileSize(dest) };
   }
 
-  // ---------------- 系统镜像可达性预检 ----------------
+  // ---------------- system image reachability pre-check ----------------
 
   async probeSources() {
     const [adb, qemu, iso] = await Promise.all([

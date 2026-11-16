@@ -1,18 +1,18 @@
 'use strict';
 /**
- * 在线更新：从 GitHub Releases（RoutineMiku/apkstart）取最新版本，下载并原地替换。
+ * Online update: take the latest version from GitHub Releases (RoutineMiku/apkstart), download and replace in place.
  *
- * 三个形态都要照顾到：
- *   - 安装版（NSIS）：下载 `ApkStart-x.y.z-Setup.exe`，静默安装（/S）；
- *   - 轻量版（便携 zip，运行时按需下载）：下载 `ApkStart-vX-win64-portable.zip`，
- *     解压后覆盖程序目录 —— 运行时目录（%APPDATA%\apkstart\runtime）与已装应用、
- *     快照全都在用户目录里，替换程序文件不会动它们；
- *   - 完整版（便携但带 runtime）：同轻量版，只是目录里多了 resources\runtime。
+ * All three package shapes must be handled:
+ *   - Installer (NSIS): download `ApkStart-x.y.z-Setup.exe` and install silently (/S);
+ *   - Lite (portable zip, runtime fetched on demand): download `ApkStart-vX-win64-portable.zip`,
+ *     extract over the program directory - the runtime directory (%APPDATA%\apkstart\runtime), installed apps
+ *     and snapshots all live under the user profile, so replacing program files does not touch them;
+ *   - Full (portable with runtime bundled): same as lite, plus resources\runtime in the tree.
  *
- * 替换不能在本进程里做（exe 正被占用），所以生成一段 PowerShell 脚本，
- * 用 EncodedCommand 交给独立进程：等本进程退出 → 复制文件 → 重新拉起。
- * 用 base64 传脚本而不是写 .ps1 文件，是为了绕开「路径含中文时脚本被按 GBK 解码」
- * 这类老问题（PowerShell 5.1 读无 BOM 脚本会按 ANSI 解释）。
+ * Replacement cannot happen in this process (the exe is in use), so a PowerShell script is generated
+ * and handed to a separate process via EncodedCommand: wait for exit -> copy files -> relaunch.
+ * Passing the script as base64 rather than writing a .ps1 avoids the classic problem of a script
+ * being decoded as GBK when the path contains non-ASCII (PowerShell 5.1 reads BOM-less scripts as ANSI).
  */
 const fs = require('fs');
 const path = require('path');
@@ -25,7 +25,7 @@ const { Sources } = require('./sources');
 const OWNER = 'RoutineMiku';
 const REPO = 'apkstart';
 
-/** PowerShell 单引号字符串：内部的 ' 要写成 '' */
+/** PowerShell single-quoted string: inner ' must be doubled */
 function psq(s) {
   return `'${String(s).replace(/'/g, "''")}'`;
 }
@@ -43,13 +43,13 @@ class Updater {
     this.dataDir = o.dataDir;
     this.onProgress = o.onProgress || (() => {});
     this.settings = typeof o.settings === 'function' ? o.settings : () => (o.settings || {});
-    // settings() 给 sources 用：决定「走 GitHub 还是 Gitee」「有没有镜像前缀」
+    // settings() feeds sources: decides "GitHub or Gitee" and "is there a mirror prefix"
     this.sources = new Sources(this.settings);
     this.latest = null;
     this._last = null;
   }
 
-  /** 安装形态：安装版（有卸载器）还是便携包 */
+  /** Package shape: installer (has uninstaller) or portable */
   get flavor() {
     try {
       const un = fs.readdirSync(this.installDir).find((n) => /^Uninstall .*\.exe$/i.test(n));
@@ -63,19 +63,19 @@ class Updater {
   }
 
   /**
-   * 检查更新：GitHub / Gitee 并发问，取版本号更高的，资产取并集。
-   * 具体下载地址在 prepare() 里再做一次真实测速排序。
+   * Check for updates: query GitHub / Gitee concurrently, keep the higher version, union the assets.
+   * Real download URLs are speed-ranked again inside prepare().
    */
   /**
-   * @param {{force?:boolean}} [opts] force=true 时跳过 10 分钟的版本缓存
-   *        （用户主动点「检查更新」应该拿到最新结果；启动时的静默检查走缓存）
+   * @param {{force?:boolean}} [opts] force=true skips the 10-minute version cache
+   *        (an explicit "check for updates" must return fresh data; the silent startup check uses the cache)
    */
   async check(opts = {}) {
     const merged = await this.sources.latest({ force: !!opts.force });
     const pick = (re) => merged.assets.find((a) => re.test(String(a.name || '')));
-    // 发行版里同时挂着「便携包」和「运行时整包」（ApkStart-runtime-*.zip）。
-    // 兜底的 .zip 匹配必须把运行时整包排除掉：某次发布如果只有运行时整包、
-    // 没有便携包，旧逻辑会把它当更新包解压进程序目录（多出 1.5GB 文件、程序也被换坏）。
+    // Releases carry both the "portable package" and the "runtime bundle" (ApkStart-runtime-*.zip).
+    // The fallback .zip match must exclude the runtime bundle: if a release only ships the runtime bundle
+    // and no portable package, the old logic extracted it into the program directory (1.5 GB of junk, broken install).
     const isRuntimePack = (a) => /runtime/i.test(String((a && a.name) || ''));
 
     const wantSetup = this.flavor === 'setup';
@@ -91,14 +91,14 @@ class Updater {
       notes: merged.notes,
       htmlUrl: merged.htmlUrl,
       publishedAt: merged.publishedAt,
-      // 注意带上 parts：Gitee 的分片包没有单一 url，丢掉 parts 就变成「有资产但没地址」
+      // Keep parts: a Gitee split package has no single URL; dropping parts leaves "asset without address"
       asset: asset
         ? {
           name: asset.name,
           size: asset.size,
           url: asset.url,
-          // 同名资产在 GitHub / Gitee 都有：两个地址都带着，prepare() 里测速择快。
-          // sizes 是「每个地址各自的大小」——两个源压出来的字节数并不相同。
+          // Same-named assets exist on both GitHub / Gitee: keep both URLs and let prepare() pick the faster.
+          // sizes are per-URL byte counts - the two sources do not produce identical archives.
           urls: asset.urls,
           sizes: asset.sizes,
           source: asset.source,
@@ -107,7 +107,7 @@ class Updater {
         }
         : null,
       assets: merged.assets,
-      // 两个源各自的最新版本 / 谁不可达，界面上可以如实显示「这次走的哪个源」
+      // Per-source latest version / reachability lets the UI show which source was used
       sources: merged.sources,
       unreachable: merged.unreachable,
       flavor: this.flavor,
@@ -120,7 +120,7 @@ class Updater {
   }
 
   /**
-   * 下载并准备好「载荷」：便携版解压到 update/<ver>/payload，安装版直接留 Setup.exe。
+   * Download and stage the payload: portable extracts to update/<ver>/payload, installer keeps Setup.exe.
    * @returns {Promise<{mode:'zip'|'setup', payload:string, version:string}>}
    */
   async prepare(info) {
@@ -132,26 +132,26 @@ class Updater {
     let total = it.asset.size || 0;
     const conns = Math.max(1, Math.min(16, Number((this.settings().runtime || {}).downloadConnections) || 8));
 
-    // Gitee 附件单文件上限 100MB，所以发布时会把包切成 .part1/.part2。
-    // 每个分片单独测速选源（可以一部分来自 Gitee、一部分来自 GitHub 镜像），
-    // 下完按顺序拼回整包 —— 对用户来说仍然只是「下载 + 解压」。
+    // Gitee caps attachments at 100 MB, so releases split the package into .part1/.part2.
+    // Each part is speed-ranked and sourced independently (some from Gitee, some from a GitHub mirror),
+    // then concatenated in order - still just "download + extract" from the user's perspective.
     if (it.asset.parts && it.asset.parts.length) {
       await this._downloadParts(it.asset, file, conns, total);
     } else {
       this.onProgress({ stage: 'download', percent: 1, message: `Downloading ${it.asset.name}…` });
-      // 候选地址 = 源站 + 镜像前缀；先各下 256KB 实测速度，再拿最快的那个分块下载。
-      // 这是「GitHub 直连几十 KB/s、镜像能跑几 MB/s」时唯一靠谱的选路方式：
-      // 按域名猜没用，同一天不同时段差别很大。
+      // Candidates = origin + mirror prefix; sample 256 KB from each, then chunk-download from the fastest.
+      // This is the only reliable routing when "GitHub direct gives tens of KB/s, a mirror gives MB/s":
+      // guessing by domain does not work; speeds vary greatly within a single day.
       const cands = this.sources.candidates(it.asset);
       const ranked = await this.sources.rank(cands, { onProgress: (p) => this.onProgress(p) }).catch(() => cands);
-      // 进度用的总大小要取「真正在下那个源」的：GitHub 与 Gitee 的包不是同一份字节
-      // （压缩器不同，能差好几 MB），拿错就会一直显示 92% 再突然跳到完成。
+      // Progress must use the total size of the source actually being downloaded: GitHub and Gitee archives differ
+      // (different compressors, several MB apart); the wrong one shows 92% forever then jumps to done.
       const sizes = it.asset.sizes || {};
       for (const u of ranked) {
         if (sizes[u]) { total = sizes[u]; break; }
       }
-      // downloadMulti：分块同时从「GitHub 直连」和「镜像」拉，带宽叠加；
-      // 只有一个源可用或对方不支持 Range 时，它自己退回单源分块。
+      // downloadMulti: chunks pulled from "GitHub direct" and "mirror" simultaneously, bandwidth adds up;
+      // with a single usable source or no Range support it falls back to single-source chunking.
       await downloadMulti(ranked, file, {
         connections: conns,
         onProgress: (pr) => {
@@ -181,7 +181,7 @@ class Updater {
   }
 
   /**
-   * 下载并拼装分片包。
+   * Download and assemble a split package.
    * @param {{name:string, size:number, parts:Array<{index:number,size:number,urls:string[]}>}} asset
    */
   async _downloadParts(asset, target, conns, total) {
@@ -239,7 +239,7 @@ class Updater {
       for (const n of names) {
         i += 1;
         const target = path.join(dest, n.replace(/\\/g, '/'));
-        if (!target.startsWith(path.resolve(dest))) continue;   // 防 zip-slip
+        if (!target.startsWith(path.resolve(dest))) continue;   // guard against zip-slip
         fs.mkdirSync(path.dirname(target), { recursive: true });
         await zf.pipeTo(n, fs.createWriteStream(target));
         if (i % 20 === 0) {
@@ -256,9 +256,9 @@ class Updater {
   }
 
   /**
-   * 生成并启动「替换 + 重启」脚本，然后调用方负责退出应用。
+   * Generate and start the "replace + restart" script; the caller is then responsible for quitting.
    * @param {{mode:'zip'|'setup', payload:string, version:string}} job
-   * @param {{waitPid?:number, spawn?:boolean}} [opts] 测试时可指定别的 pid / 不真启动
+   * @param {{waitPid?:number, spawn?:boolean}} [opts] tests may override the pid / skip spawning
    */
   apply(job, opts = {}) {
     const exe = this.exePath;
@@ -272,7 +272,7 @@ class Updater {
       `$log = ${psq(logFile)}`,
       `function Note($m) { Add-Content -Path $log -Value ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) }`,
       `Note 'updater start'`,
-      // 等本进程真正退出（最多 90 秒），否则 exe/dll 仍被占用
+      // Wait for this process to really exit (max 90s), otherwise exe/dll files stay locked
       `try { Wait-Process -Id ${waitPid} -Timeout 90 } catch { }`,
       `Start-Sleep -Milliseconds 700`,
     ];
@@ -289,8 +289,8 @@ class Updater {
         `  Note "copy pass $i failed, retry"; Start-Sleep -Milliseconds 600`,
         `}`,
         `if (-not $ok) { Note 'copy failed' }`,
-        // 新版本里已经删掉的文件不会因为覆盖而消失，但保留它们无害；
-        // 只清掉本次的解压目录，避免白占几百 MB。
+        // Files removed in the new version do not disappear on overwrite, but keeping them is harmless;
+        // only the extraction directory is cleaned to avoid wasting hundreds of MB.
         `Remove-Item -Path $src -Recurse -Force`,
       );
     } else {
@@ -307,20 +307,20 @@ class Updater {
       `Note 'updater done'`,
       `Start-Sleep -Milliseconds 400`,
       `Remove-Item -Path ${psq(path.join(this.updateDir, job.version))} -Recurse -Force`,
-      // 收尾的清理语句失败（目录已被删/被杀软占用）不应该让调用方以为更新失败
+      // A failing cleanup statement (dir already gone / locked by AV) must not make the caller think the update failed
       `exit 0`,
     );
 
     const script = lines.join('\r\n');
     fs.writeFileSync(path.join(this.updateDir, 'apply.log.ps1'), script, 'utf8');
     if (opts.spawn === false) return script;
-    // -EncodedCommand 走 UTF-16LE base64：脚本里出现中文路径也不会被 GBK 解码搞坏
+    // -EncodedCommand uses UTF-16LE base64: non-ASCII paths inside the script survive ANSI decoding
     const b64 = Buffer.from(script, 'utf16le').toString('base64');
     const ps = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    // 这里**不能**用 detached：某些安全软件 / 沙箱策略会直接拦掉「分离的控制台进程」，
-    // 表现为脚本一声不响地根本没跑（更新界面卡在「正在替换程序并重启」）。
-    // Windows 上父进程退出并不会杀掉普通子进程，所以用「普通子进程 + unref」同样能在
-    // 我们退出之后继续干活，兼容性还更好。
+    // Do **not** use detached here: some security software / sandbox policies block detached console processes,
+    // and the script silently never runs (the UI hangs on "replacing files and restarting").
+    // On Windows a parent exit does not kill an ordinary child, so "ordinary child + unref" keeps working
+    // after we exit, with better compatibility.
     const child = spawn(ps, [
       '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-WindowStyle', 'Hidden', '-EncodedCommand', b64,
@@ -329,7 +329,7 @@ class Updater {
     return true;
   }
 
-  /** 打不开 UI 的场景（或没有可自动安装的资产）时，把发布页丢给浏览器 */
+  /** When the UI cannot open (or no auto-installable asset exists), hand the release page to the browser */
   static repoUrl() {
     return `https://github.com/${OWNER}/${REPO}/releases`;
   }
