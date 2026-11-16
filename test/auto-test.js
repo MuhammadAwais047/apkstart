@@ -130,9 +130,9 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     const p = doctor.autoProfile({ ...common, settings: { engine: { autoMemory: true, gpuMode: 'auto', memoryMB: 0, cores: 0 } } });
     const text = doctor.describeProfile(p);
     assert(p.gpu === 'host', `应为 host（失败降级），实际 ${p.gpu}`);
-    assert(p.accelOk === true && text.includes('硬件加速'), text);
+    assert(p.accelOk === true && text.includes('hardware acceleration'), text);
     assert(!text.includes('swiftshader_indirect'), text);
-    assert(text.includes('端口 5562'), text);
+    assert(text.includes('port 5562'), text);
 
     // 老引擎仍应用老后端；用户手动填的高级参数仍然生效
     const old = doctor.autoProfile({ ...common, emulatorVersion: '35.1.4.0', settings: {} });
@@ -188,12 +188,12 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
 
   await test('Android 14 老 targetSdk 应用失败有明确指引', () => {
     const s = friendlyInstallError('Failure [INSTALL_FAILED_DEPRECATED_SDK_VERSION: app must target at least 23]');
-    assert(s.includes('Android 14') && s.includes('自动'), s);
+    assert(s.includes('Android 14') && s.includes('automatically'), s);
   });
 
   await test('ARM 翻译层崩溃能给出可执行的中文结论', () => {
     const s = friendlyLaunchError('F DEBUG: DoBadTrampoline libndk_translation SIGABRT', 'com.phoenix.read');
-    assert(s.includes('ARM 翻译层') && s.includes('兼容镜像'), s);
+    assert(s.includes('ARM translator') && s.includes('compatibility image'), s);
   });
 
   console.log('\n[sharer 不再来回搬运（磁盘写满的元凶）]');
@@ -857,7 +857,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
       accel: { ok: true }, emulatorVersion: '37.3.8.0', diskMB: 100000,
     });
     assert(manual.cores === 6, '用户手动指定的核数必须优先于轻量模式');
-    assert(/轻量容器/.test(doctor.describeProfile(auto)), '诊断摘要应标出轻量容器');
+    assert(/lightweight container/.test(doctor.describeProfile(auto)), '诊断摘要应标出轻量容器');
   });
 
   await test('全局鼠标钩子默认关闭，且窗口代理不再长时间阻塞消息泵', () => {
@@ -942,7 +942,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(!pointer.isInputCommand('sh -c anything'));
     const c = new AdbClient({ adbPath: 'adb', serial: 'test' });
     let blocked = false;
-    try { await c.input('input keyevent 4; rm -rf /'); } catch (e) { blocked = /非法/.test(e.message); }
+    try { await c.input('input keyevent 4; rm -rf /'); } catch (e) { blocked = /Invalid/.test(e.message); }
     assert(blocked, '非法命令必须在拉起 adb 之前被挡下');
     assert(c._input === null, '被挡下的命令不能创建常驻会话');
   });
@@ -1540,7 +1540,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     assert(!!reason, '403 必须触发熔断');
     assert(s.blockedReason('github') === null, '没出错的源不应被熔断');
     // 熔断期内的请求应被直接跳过（不再打网络）
-    assert(/暂时跳过/.test(reason), `跳过原因要能看懂，实际：${reason}`);
+    assert(/Skipping for now/.test(reason), `跳过原因要能看懂，实际：${reason}`);
     s.reset();
     assert(s.blockedReason('gitee') === null, 'reset 后熔断应解除');
   });
@@ -1686,7 +1686,7 @@ const { AdbClient, friendlyInstallError, friendlyLaunchError } = require('../src
     fs.writeFileSync(badPath, buildStoredZip([{ name: 'readme.txt', data: Buffer.from('nope') }]));
     let err = null;
     try { await parseBundle(badPath); } catch (e) { err = e; }
-    assert(err && /没有找到 APK 分片/.test(err.message), `应报没有分片，实际 ${err && err.message}`);
+    assert(err && /No APK splits/.test(err.message), `应报没有分片，实际 ${err && err.message}`);
     const dir = path.join(os.tmpdir(), 'apkstart-bundle',
       crypto.createHash('sha1').update(badPath).digest('hex').slice(0, 12));
     assert(!fs.existsSync(dir), '失败时应清理临时目录');

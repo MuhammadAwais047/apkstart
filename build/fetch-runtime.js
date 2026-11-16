@@ -37,7 +37,7 @@ const log = (p) => console.log(`[${p.stage}] ${p.message} ${p.percent != null ? 
     fs.existsSync(path.join(outRoot, 'emulator', 'emulator.exe')) &&
     fs.existsSync(path.join(outRoot, 'platform-tools', 'adb.exe')) &&
     fs.existsSync(path.join(outRoot, 'system-images', 'android-34', 'google_apis_playstore', 'x86_64', 'system.img'));
-  if (!ok) throw new Error('运行时组装后校验失败');
+  if (!ok) throw new Error('Runtime assembly verification failed');
 
   // 容器式精简：只保留 x86_64 的 QEMU 与无头运行必需的组件。
   // 非 x86_64 的 qemu-system-*.exe（约 400MB）、QtWebEngine、netsim 等对 -no-window 无用。

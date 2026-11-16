@@ -1,12 +1,12 @@
-# 运行时栈代码走读（sources / download / provision / updater / store / layers / 小工具）
+# Runtime stack code walkthrough (sources / download / provision / updater / store / layers / small utilities)
 
-> 代码版本：`package.json` = **0.3.5**，`main` = `src/main.js`。
-> 行号对应当前工作副本（`D:\apkstart-dsh\apkstart`），文件可能已变动，引用前请以函数名为准再核一次行号。
-> 阅读范围：`src/core/{sources,download,provision,updater,store,layers,logfile,notify,android,display}.js`，
-> 顺带读了调用方 `src/main.js` / `src/core/{engine,emulator,installer}.js` 与 `test/`。
-> 本文只描述代码事实；「✓」= 有测试，「✗」= 无覆盖。
+> Code version: `package.json` = **0.3.5**, `main` = `src/main.js`.
+> Line numbers refer to the current working copy (`D:\apkstart-dsh\apkstart`); files may have changed, so look up the function name and re-check the line number before quoting.
+> Scope: `src/core/{sources,download,provision,updater,store,layers,logfile,notify,android,display}.js`,
+> plus the callers `src/main.js` / `src/core/{engine,emulator,installer}.js` and `test/`.
+> This document states code facts only; "yes" = has a test, "no" = no coverage.
 
-依赖方向（重要，避免循环 require）：
+Dependency direction (important, to avoid circular requires):
 
 ```
 main.js ──> engine.js ──> provision.js ──> sources.js ──> version.js
@@ -14,253 +14,253 @@ main.js ──> engine.js ──> provision.js ──> sources.js ──> versio
    │            │              │  └──> download.js
    │            │              └─────> store.js / doctor.js / zip.js
    │            ├──> emulator.js ──> provision.js / logfile.js
-   │            └──> layers.js ──> store.js（summary 内延迟 require）
+   │            └──> layers.js ──> store.js (lazy require inside summary)
    ├──> updater.js ──> sources.js / download.js / zip.js / version.js
-   ├──> installer.js ──> store.js / provision.js(通过 runtime.provisioner)
+   ├──> installer.js ──> store.js / provision.js (via runtime.provisioner)
    └──> android.js / notify.js / display.js / logfile.js
 ```
 
-`version.js` 单独存在的原因写在 `version.js:2-4`：避免 `updater ↔ sources` 互相 require 形成环。
+The reason `version.js` exists on its own is written in `version.js:2-4`: to keep `updater` and `sources` from requiring each other in a cycle.
 
 ---
 
-## 1. `src/core/sources.js` — GitHub / Gitee 双源 + 镜像 + 测速 + 熔断缓存
+## 1. `src/core/sources.js` — GitHub / Gitee dual source + mirrors + speed test + circuit-breaker cache
 
-### 职责
-把「读版本信息」和「拿下载地址」抽象成一组按**实测字节速度**排序的候选 URL，并对被限流/报错的源做短期熔断。
+### Responsibility
+Abstracts "read version info" and "get download URLs" into a set of candidate URLs ordered by **measured byte throughput**, and briefly trips a circuit breaker for sources that are rate-limited or erroring.
 
-### 对外接口
+### Public interface
 
-| 导出 | 签名 | 说明 |
+| Export | Signature | Notes |
 |---|---|---|
-| `Sources` | `new Sources(settingsFn)` | `settingsFn: () => settings`，每次判定时现读（不缓存设置） |
-| `Sources#blockedReason` | `(id: 'github'\|'gitee') => string\|null` | `null` = 可用；否则返回中文原因 `暂时跳过（N 分钟内不再尝试）`（230-234） |
-| `Sources#fetchReleases` | `() => Promise<Array<{source,name,web,rel?,error?}>>` | 按 `sourcePreference` 决定问一边还是两边，`Promise.all` 并发（237-271）；可被测试覆写 |
-| `Sources#latest` | `({force=false}) => Promise<Merged>` | 合并后的版本信息（见下），10 分钟缓存（277-364） |
-| `Sources#candidates` | `(assetOrUrl: string\|{url}\|{urls:[]}) => string[]` | 源站优先、镜像其次，去重保序（371-393） |
-| `Sources#rank` | `(urls, {onProgress}) => Promise<string[]>` | 按 30 分钟内缓存的实测速度降序；≤1 个地址直接返回（399-432） |
-| `Sources#reset` | `() => void` | 清测速缓存 + 版本缓存 + 熔断（435-439） |
-| `SOURCES` | `{github:{id,name,api,web}, gitee:{...}}` | 常量，owner 写死在 22-24 |
-| `measure` | `(url, {bytes=256*1024, timeoutMs=9000}) => Promise<{url,ok,got,ms,ttfb,speed,error?}>` | 真下 256KB 测吞吐（108-157） |
-| `withMirror` | `(url, prefix) => string` | 前缀补尾斜杠；非 `http(s)://` 返回 `''`（160-164） |
-| `mirrorList` | `(settings) => string[]` | 自定义前缀唯一生效 → 其次 `autoMirror!==false` 时的内置镜像（207-213） |
+| `Sources` | `new Sources(settingsFn)` | `settingsFn: () => settings`, read fresh on every decision (settings are not cached) |
+| `Sources#blockedReason` | `(id: 'github'\|'gitee') => string\|null` | `null` = usable; otherwise returns the reason string `temporarily skipped (not retried for N minutes)` (230-234) |
+| `Sources#fetchReleases` | `() => Promise<Array<{source,name,web,rel?,error?}>>` | Uses `sourcePreference` to decide whether to ask one side or both, `Promise.all` in parallel (237-271); can be overridden by tests |
+| `Sources#latest` | `({force=false}) => Promise<Merged>` | Merged version info (see below), 10-minute cache (277-364) |
+| `Sources#candidates` | `(assetOrUrl: string\|{url}\|{urls:[]}) => string[]` | Original source first, mirrors after, deduplicated with order preserved (371-393) |
+| `Sources#rank` | `(urls, {onProgress}) => Promise<string[]>` | Descending by measured speed cached for 30 minutes; ≤1 URL returns immediately (399-432) |
+| `Sources#reset` | `() => void` | Clears the speed cache + version cache + breaker (435-439) |
+| `SOURCES` | `{github:{id,name,api,web}, gitee:{...}}` | Constants with the owner hardcoded at 22-24 |
+| `measure` | `(url, {bytes=256*1024, timeoutMs=9000}) => Promise<{url,ok,got,ms,ttfb,speed,error?}>` | Actually downloads 256KB to measure throughput (108-157) |
+| `withMirror` | `(url, prefix) => string` | Adds a trailing slash to the prefix; returns `''` for a non-`http(s)://` value (160-164) |
+| `mirrorList` | `(settings) => string[]` | A custom prefix wins exclusively → otherwise the built-in mirrors while `autoMirror!==false` (207-213) |
 | `KNOWN_MIRRORS` | `['https://ghfast.top/','https://gh-proxy.com/']` | 42-45 |
 
-`latest()` 返回结构（350-361）：
+The structure returned by `latest()` (350-361):
 
 ```js
 {
   version, tag, name, notes, htmlUrl, publishedAt,
   assets: [{ name, size, url, urls: string[], sizes: { [url]: bytes },
              parts?: [{index,size,urls:[]}], partial?: bool, source }],
-  sources: [{ source, name, tag }],      // 参与合并的源
+  sources: [{ source, name, tag }],      // sources that took part in the merge
   unreachable: [{ source, name, error }],
-  bySource,                              // 胜出源
-  stale?: true, staleReason?             // 全部源挂掉但手里有旧结果（296）
+  bySource,                              // winning source
+  stale?: true, staleReason?             // every source failed but an old result is at hand (296)
 }
 ```
 
-### 关键实现
+### Key internals
 
-**1) 版本获取 = 并发问两边 + 降级列表接口（248-269）**
-- 先 `${api}/releases/latest`，失败再 `${api}/releases?per_page=10` 取第一条非 `draft`；
-- Gitee 私有仓库会回 **404 "Not Found Project"**（而不是 401），此时可填只读 `runtime.giteeToken`（243-246 会拼 `access_token`）；
-- 只有 `403/429` 才记熔断，`_blockMs = 15min`（226、263）。**熔断也在 `latest()` 里补记一次**（286-290），注释说明是为了让「谁提供结果」可被测试替换（auto-test 就是这么注入的）。
+**1) Version lookup = ask both sides in parallel + fall back to the list endpoint (248-269)**
+- First `${api}/releases/latest`; on failure `${api}/releases?per_page=10` and take the first non-`draft` entry;
+- A private Gitee repository answers **404 "Not Found Project"** (not 401); in that case the read-only `runtime.giteeToken` can be filled in (`243-246` appends `access_token`);
+- Only `403/429` records a breaker, `_blockMs = 15min` (226, 263). **The breaker is also recorded again inside `latest()`** (286-290); the comment says this lets tests replace "who provided the result" (that is how auto-test injects it).
 
-**2) 合并策略**
-- 版本号用 `cmpVer` 取最高（299），然后**只保留与该版本相同的资产**（307-310）；
-- 资产白名单：`/^ApkStart/i`（316），排除 Gitee 自动挂的源码包；
-- 同名资产跨源合并成 `urls[]`，并**逐地址记 `sizes{}`**（334-348）——两个源压出来的字节数不同，绝不能平均；
-- 同版本既有整包又有分片时**优先整包**（326-327）；
-- 全部源失败但 `_relCache.value` 存在 → 返回旧结果并打 `stale`（292-298），避免界面直接报错。
+**2) Merge strategy**
+- The version is the highest by `cmpVer` (299), then **only assets of that version are kept** (307-310);
+- Asset allowlist: `/^ApkStart/i` (316), excluding the source archives Gitee attaches automatically;
+- Same-name assets from different sources merge into `urls[]` and **record `sizes{}` per URL** (334-348) — the two sources compress to different byte counts, so they must never be averaged;
+- If the same version has both a full package and parts, **the full package wins** (326-327);
+- If every source fails but `_relCache.value` exists → return the old result flagged `stale` (292-298), so the UI does not have to show an error.
 
-**3) 缓存三层**
+**3) Three cache layers**
 
-| 缓存 | 字段 | TTL | 失效 |
+| Cache | Field | TTL | Invalidated by |
 |---|---|---|---|
-| 测速 | `_rankCache: Map<url,{at,ok,speed}>` | 30min（219） | `reset()`；`ok=false` 也缓存，排序时记 -1（418-421） |
-| 版本 | `_relCache: {at,key,value}` | 10min（223） | `key` 不匹配（`sourcePreference` 变了）/ `force` / `reset()` |
-| 熔断 | `_blocked: Map<sourceId, untilMs>` | 15min（226） | `reset()` |
+| Speed test | `_rankCache: Map<url,{at,ok,speed}>` | 30min (219) | `reset()`; `ok=false` is cached too and sorts as -1 (418-421) |
+| Version | `_relCache: {at,key,value}` | 10min (223) | `key` mismatch (`sourcePreference` changed) / `force` / `reset()` |
+| Breaker | `_blocked: Map<sourceId, untilMs>` | 15min (226) | `reset()` |
 
-**4) 测速是「串行」的（408-417）**：注释明确写了并发会互相抢带宽，测出来变成「谁抢得凶」。代价是最坏情况 `候选数 × 9s`（`measure` 的 `timeoutMs`）。
+**4) Speed tests are serial (408-417)**: the comment states plainly that running them concurrently makes them steal each other's bandwidth, so the result becomes "whoever grabs hardest". The cost is a worst case of `candidate count × 9s` (the `timeoutMs` of `measure`).
 
-**5) 吞吐只算「收到首字节之后」的时间（120-122）**：`span = now - (firstAt || t0)`，把 TLS/DNS 固定开销排除；否则「延迟高但带宽大」的源会被误判成慢。
+**5) Throughput counts only the time after the first byte (120-122)**: `span = now - (firstAt || t0)`, excluding fixed TLS/DNS overhead; otherwise a "high latency but high bandwidth" source would be misjudged as slow.
 
-**6) 分片还原 `groupParts`（172-204）**：`xxx.zip.part1/.part2` → 逻辑资产 `{name, size=Σ, parts:[{index,size,urls:[]}], partial:true}`；缺地址或序号不连续 → `broken`，被 `list` 过滤掉，`broken` 名单返回但 `latest()` **没有向外暴露**。
+**6) Reassembling parts in `groupParts` (172-204)**: `xxx.zip.part1/.part2` → a logical asset `{name, size=Σ, parts:[{index,size,urls:[]}], partial:true}`; a missing URL or a non-contiguous index marks it `broken`, which `list` filters out; the `broken` list is returned but `latest()` **does not expose it**.
 
-### 坑点与不变量
+### Pitfalls and invariants
 
-- **Gitee 单文件 100MiB**（172-204 注释、`.github/release.yml:36-44,78-100`）：超限就切 `.part1/.part2`；`updater._downloadParts` 负责拼回。
-- **Gitee 资产条目没有 `size`**（198-201）：所以「完整性」只要求「分片连续 + 每片有地址」，不能要求 `size>0`；大小未知时进度按已收字节显示。
-- **源码包 `v1.2.3.zip` / `.tar.gz` 会混进资产**（313-316）：靠 `^ApkStart` 白名单挡掉，`\.zip$` 这种后缀匹配会把源码包当更新包下下来。
-- **镜像只能套 GitHub 地址**（366-369、385-390）：ghfast / gh-proxy 只代理 GitHub，拼 Gitee 只会 403，白测一次速。
-- **同名资产必须留全部地址**（329-333）：以前按名字去重「谁先来用谁」，GitHub 在前 → Gitee 地址被丢 → 自动选源退化成只用 GitHub。
-- `SAMPLE_BYTES = 256KB`（52），但 `provision.installRuntimePack:532` 的注释还写着「128KB」——**注释已过期，实现是 256KB**。
-- `measure` 里 `openUrl` 返回的是 `res`（流），`done()` 时 `req.destroy()` 关的是流不是请求对象（115-132 的 `req = res`），能用但命名有误导性。
-- `groupParts` 对 `part0`（从 0 开始）也会判 `broken`（196 要求 `index === i+1`）。
-- 不变量：`candidates()` 第一项永远是**原始源站 URL**（380-382），`rank()` 只在 `length>1` 时排序（401），这是「最坏情况还能直连下载」的保底。
+- **Gitee's 100MiB per-file limit** (comment at 172-204, `.github/release.yml:36-44,78-100`): anything over it is split into `.part1/.part2`; `updater._downloadParts` stitches them back.
+- **Gitee asset entries carry no `size`** (198-201): so "integrity" only requires "parts contiguous + each part has a URL", never `size>0`; when the size is unknown progress is shown by bytes received.
+- **Source archives `v1.2.3.zip` / `.tar.gz` show up among the assets** (313-316): the `^ApkStart` allowlist blocks them; a suffix match like `\.zip$` would download the source archive as an update package.
+- **Mirrors can only wrap GitHub URLs** (366-369, 385-390): ghfast / gh-proxy proxy GitHub only, so appending a Gitee URL just yields 403 after a wasted speed test.
+- **Same-name assets must keep every URL** (329-333): the old behavior deduplicated by name ("first one wins"), GitHub came first → Gitee addresses were dropped → automatic source selection degenerated to GitHub only.
+- `SAMPLE_BYTES = 256KB` (52), yet the comment at `provision.installRuntimePack:532` still says "128KB" — **the comment is stale; the implementation uses 256KB**.
+- In `measure`, `openUrl` returns `res` (the stream), and `done()` calls `req.destroy()` on the stream rather than the request object (`req = res` at 115-132); it works, but the naming is misleading.
+- `groupParts` also marks `part0` (starting at 0) as `broken` (196 requires `index === i+1`).
+- Invariant: the first item of `candidates()` is always **the original source URL** (380-382) and `rank()` only sorts when `length>1` (401) — the guarantee that "in the worst case a direct download still works".
 
-### 被谁调用
-- `src/core/provision.js:16`（require）、`:145`（`new Sources(() => store.getSettings())`）、`:149-151`（`get sources`）、`:535`（`rank`）、`:588`（`candidates`，`_downloadUrls`）。
-- `src/core/updater.js:23,47`（`new Sources(this.settings)`）、`:74`（`latest`）、`:140-141`（`candidates`+`rank`）、`:191-196`（分片各自 `candidates`+`rank`）。
-- `src/main.js:819-825`：设置里改了 `sourcePreference/mirrorPrefix/autoMirror` → `updater.sources.reset()` + `provisioner.sources.reset()`。**注意**：这里不会清 `provisioner._cache.pack / emulatorUrl / sysimgUrl / playUrl`（见 §3 坑点）。
+### Call sites
+- `src/core/provision.js:16` (require), `:145` (`new Sources(() => store.getSettings())`), `:149-151` (`get sources`), `:535` (`rank`), `:588` (`candidates`, `_downloadUrls`).
+- `src/core/updater.js:23,47` (`new Sources(this.settings)`), `:74` (`latest`), `:140-141` (`candidates`+`rank`), `:191-196` (per-part `candidates`+`rank`).
+- `src/main.js:819-825`: changing `sourcePreference/mirrorPrefix/autoMirror` in settings → `updater.sources.reset()` + `provisioner.sources.reset()`. **Note** that this does not clear `provisioner._cache.pack / emulatorUrl / sysimgUrl / playUrl` (see the pitfalls in §3).
 
-### 测试覆盖（`test/auto-test.js`）
-- ✓ `:843` 候选地址含镜像前缀，自定义前缀优先于公共镜像
-- ✓ `:864` 测速结果按速度排序，全部失败时保持原序不丢可用地址（并验证 `reset()`）
-- ✓ `:878` Gitee 自动附带的源码包（`v1.2.3.zip`）绝不能被当成安装包
-- ✓ `:901` Gitee 资产没有 `size`：分片组仍要成立
-- ✓ `:926` 分片资产必须一路传到 `updater.asset`
-- ✓ `:949` 合并版本时只认同版本资产
-- ✓ `:976` 同名整包两边都有时两个地址都留着
-- ✓ `:1282` 版本结果缓存 10 分钟，`force` 强制重查
-- ✓ `:1300` 403 熔断跳过 + `blockedReason` 文案 + `reset()` 解除
-- ✓ `:1323` 全部源不可达时退回上次结果（`stale`）
+### Test coverage (`test/auto-test.js`)
+- yes `:843` candidate URLs include mirror prefixes, and a custom prefix takes precedence over public mirrors
+- yes `:864` speed-test results are sorted by speed, and when everything fails the original order is kept without dropping usable URLs (also verifies `reset()`)
+- yes `:878` the source archive Gitee attaches automatically (`v1.2.3.zip`) must never be treated as an installer
+- yes `:901` Gitee assets have no `size`: a part group must still form
+- yes `:926` part assets must be carried all the way to `updater.asset`
+- yes `:949` when merging versions only assets of that version are accepted
+- yes `:976` when the same-name full package exists on both sides, both URLs are kept
+- yes `:1282` the version result is cached for 10 minutes and `force` re-queries
+- yes `:1300` a 403 trips the breaker, `blockedReason` explains it, and `reset()` clears it
+- yes `:1323` when every source is unreachable the previous result is returned (`stale`)
 
 ---
 
-## 2. `src/core/download.js` — 单流 / 分块 / 多源并行 + 断点续传 + 看门狗
+## 2. `src/core/download.js` — single stream / chunked / multi-source parallel + resume + watchdog
 
-### 职责
-只依赖 `http/https/fs` 的四层下载器：单流续传 → 单源分块 → 多源分块（带宽叠加）→ 依次换源；全部带空闲看门狗与「保证 settle」保护。
+### Responsibility
+A four-tier downloader built only on `http/https/fs`: single-stream resume → single-source chunking → multi-source chunking (bandwidth aggregation) → try the next source; all with an idle watchdog and a "must settle" guarantee.
 
-### 对外接口
+### Public interface
 
-| 导出 | 签名 | 返回 |
+| Export | Signature | Returns |
 |---|---|---|
-| `openStream` | `(url, {method='GET', headers={}, redirects=0}) => Promise<IncomingMessage>` | 跟随 301/302/303/307/308（≤6 跳），socket 空闲超时 30s（15-36） |
-| `head` | `(url) => Promise<{status,size,type,error?}>` | 永不抛，失败 `status:0`（38-50） |
+| `openStream` | `(url, {method='GET', headers={}, redirects=0}) => Promise<IncomingMessage>` | Follows 301/302/303/307/308 (≤6 hops), 30s socket idle timeout (15-36) |
+| `head` | `(url) => Promise<{status,size,type,error?}>` | Never throws; `status:0` on failure (38-50) |
 | `sha256File` | `(file) => Promise<hex>` | 52-60 |
 | `download` | `(url, dest, opt) => Promise<{file,size}>` | `opt = {onProgress,signal,expectSha256,retries=2,idleMs=30000}` |
 | `downloadParallel` | `(url, dest, opt) => Promise<{file,size,parallel:n}>` | `opt += {connections=8,minChunk=1MB,retries=3}` |
-| `downloadAny` | `(urls, dest, opt) => Promise<{file,size,url}>` | 依次试，全失败抛聚合错误（314-326） |
-| `downloadMulti` | `(urls, dest, opt) => Promise<{file,size,parallel,sources,multi,resumed}>` | `opt += {minChunk=2MB,retries=6,idleMs=20000,slowAfterMs=45000,slowBps=120*1024}`（338-548） |
-| `downloadAnyParallel` | `(urls, dest, opt) => Promise<{file,size,url}>` | 依次用 `downloadParallel`（551-563） |
+| `downloadAny` | `(urls, dest, opt) => Promise<{file,size,url}>` | Tries each in turn, throws an aggregate error when all fail (314-326) |
+| `downloadMulti` | `(urls, dest, opt) => Promise<{file,size,parallel,sources,multi,resumed}>` | `opt += {minChunk=2MB,retries=6,idleMs=20000,slowAfterMs=45000,slowBps=120*1024}` (338-548) |
+| `downloadAnyParallel` | `(urls, dest, opt) => Promise<{file,size,url}>` | Calls `downloadParallel` for each in turn (551-563) |
 
-`onProgress` 回调体：`{got,total,percent,speed,eta}`（`downloadMulti` 额外带 `sources`）。
+`onProgress` payload: `{got,total,percent,speed,eta}` (`downloadMulti` additionally includes `sources`).
 
-### 关键实现
+### Key internals
 
-**1) `download()`：单流 + 续传（68-173）**
-- 每次尝试前 `statSync(dest).size` → `Range: bytes=existing-`（75-77）；
-- `416` 视为「已完整」，直接 `break`（82-86）；
-- `200` 且 `existing>0` = 服务器不支持续传 → `rmSync` 后重写（97-100）；
-- 非 200/206：最多重试 `retries=2` 次，**固定退避 1500ms**（87-90）；
-- 空闲看门狗 `idleMs`（默认 30s）：`kick()` 每次收到数据重置，超时 `res.destroy()` + `finish(Error('连接停滞（长时间无数据）'))`（112-130）。注释（109-111）记录：连接静默时 `res` 既不 `end` 也不 `error`，`pipe` 永不 `finish`，整个下载卡死且无报错；
-- `signal.abort` → `res.destroy(new Error('已取消'))`（132-133）；
-- 收尾强制 `onProgress({percent:100})`（162-163）；`expectSha256` 不符 → 删文件 + 抛错（165-171）。
+**1) `download()`: single stream + resume (68-173)**
+- Before each attempt `statSync(dest).size` → `Range: bytes=existing-` (75-77);
+- `416` is treated as "already complete" and breaks immediately (82-86);
+- `200` with `existing>0` = the server does not support resume → `rmSync` and rewrite (97-100);
+- Non-200/206: at most `retries=2` retries with a **fixed 1500ms backoff** (87-90);
+- Idle watchdog `idleMs` (default 30s): `kick()` resets it on every data chunk; on timeout `res.destroy()` + `finish(Error('connection stalled (no data for a long time)'))` (112-130). The comment (109-111) records the reason: when a connection goes silent, `res` neither `end`s nor `error`s, `pipe` never `finish`es, and the whole download hangs with no error;
+- `signal.abort` → `res.destroy(new Error('cancelled'))` (132-133);
+- On completion it forces `onProgress({percent:100})` (162-163); a mismatched `expectSha256` → delete the file + throw (165-171).
 
-**2) `downloadParallel()`：单源分块（180-311）**
-- 已有非空文件 → 直接退回 `download()`，避免分块状态丢失（188-191）；
-- 探测 Range：`Range: bytes=0-0`，206 + `content-range` 才并行；`total < minChunk*2` 也退回单流（193-210）；
-- `n = min(connections, ceil(total/minChunk))`，`per = ceil(total/n)`（212-213）；
-- 先 `ftruncateSync(fd,total)` 建空文件，再各块 `fs.writeSync(fd, buf, 0, len, pos)` 定位写（219-220、268）；
-- 每块最多 `retries=3`，退避 `800 * tries` ms（285-300）；
-- 结束校验 `size === total`，否则抛「下载不完整」（307-310）。
+**2) `downloadParallel()`: single-source chunking (180-311)**
+- An existing non-empty file → fall back to `download()` directly, to avoid losing chunk state (188-191);
+- Range probe: `Range: bytes=0-0`; parallel only with 206 + `content-range`; `total < minChunk*2` also falls back to a single stream (193-210);
+- `n = min(connections, ceil(total/minChunk))`, `per = ceil(total/n)` (212-213);
+- `ftruncateSync(fd,total)` creates the empty file first, then each chunk does a positioned `fs.writeSync(fd, buf, 0, len, pos)` (219-220, 268);
+- Each chunk gets at most `retries=3` with a `800 * tries` ms backoff (285-300);
+- Final check `size === total`, otherwise throws "download incomplete" (307-310).
 
-**3) `downloadMulti()`：多源分块（338-548）**
-1. `list = 去重(urls)`；只有一个 → `downloadParallel`（350-352）；
-2. `Promise.all` 并发探测每个地址的 `content-range` 总大小（355-365）；全部不支持 Range → `downloadAnyParallel`（367-370）；
-3. **基准总大小取 `usable[0].total`**，即 `rank()` 排好序的第一个（最快的源），不是 `Math.max`（371-377）；只混用 `total === 该值` 的源（378-381）；
-4. `n = clamp(2..connections, ceil(total/minChunk))`，块按 `i % same.length` 轮转分配源（384、409-416）；
-5. **分块断点续传边车** `${dest}.chunks.json`（391-405）：只有 `m.total===total && m.n===n && dest 大小===total` 才认；否则删文件+删边车重下。完成的块 `doneSet.add(c.start)` + `saveMeta()`（518-520）；
-6. 续传时把已完成块算进 `got`，进度不回到 0（425-427）；
-7. **低速换源**：单块跑够 `slowAfterMs=45s` 且平均 < `slowBps=120KB/s`，且 `c.rotates < 2` → `res.destroy()` + 抛「该源速度过低…换源重试」，`c.pos` 保留（446-451、492-503）。注释点名现象：**「卡在 95% 不动」**；
-8. 每块 `retries=6`（注释：3 次在「三个源里两个偶尔停摆」不够用），失败时 `c.src += 1` 换源，退避 `600 * tries`（523-534）；
-9. 失败退出时 `saveMeta()` 再抛（526-528），成功后 `rmSync(meta)`（542）。
+**3) `downloadMulti()`: multi-source chunking (338-548)**
+1. `list = dedupe(urls)`; if there is only one → `downloadParallel` (350-352);
+2. `Promise.all` probes the `content-range` total size of every URL in parallel (355-365); if none supports Range → `downloadAnyParallel` (367-370);
+3. **The baseline total comes from `usable[0].total`**, i.e. the first one after `rank()` (the fastest source), not `Math.max` (371-377); only sources with `total === that value` are mixed in (378-381);
+4. `n = clamp(2..connections, ceil(total/minChunk))`; chunks are assigned round-robin over the sources by `i % same.length` (384, 409-416);
+5. **Chunk-resume sidecar** `${dest}.chunks.json` (391-405): trusted only when `m.total===total && m.n===n && dest size===total`; otherwise the file and the sidecar are deleted and the download restarts. Completed chunks do `doneSet.add(c.start)` + `saveMeta()` (518-520);
+6. On resume the completed chunks are counted into `got`, so progress does not restart at 0 (425-427);
+7. **Slow-source switching**: once a chunk has run for `slowAfterMs=45s` with an average below `slowBps=120KB/s` and `c.rotates < 2` → `res.destroy()` + throw "this source is too slow… retrying with another source", keeping `c.pos` (446-451, 492-503). The comment names the symptom: **"stuck at 95% and not moving"**;
+8. Each chunk gets `retries=6` (the comment notes 3 was not enough when "two of three sources occasionally stall"); on failure `c.src += 1` switches source with a `600 * tries` backoff (523-534);
+9. On failure it `saveMeta()`s before throwing (526-528); on success it `rmSync(meta)`s (542).
 
-**10) 「保证 settle」双保险**：`fetchChunk` 里自己维护 `settled` + `finish()`，看门狗直接调用 `finish`，因为 `res.destroy(err)` 有时只发 `close` 不发 `error`（466-480）。
+**10) The double "must settle" guarantee**: `fetchChunk` maintains its own `settled` + `finish()`, and the watchdog calls `finish` directly, because `res.destroy(err)` sometimes emits only `close` and no `error` (466-480).
 
-### 坑点与不变量
+### Pitfalls and invariants
 
-- **多源只能混用「声明总大小一致」的源**（371-381），否则会拼出坏文件；大小不同（GitHub/Gitee 各压一份）时只走最快那个。
-- **`c.rotates` 必须显式初始化为 0**（415 注释）：`undefined < 2` 是 `false`，换源逻辑永远不触发（历史 bug）。
-- **每次请求只允许换一次源**（459-463）：同一条连接 `destroy` 后仍可能收到已缓冲的包，会重复触发换源把源跳过头。
-- **续传只对 `download()` 与 `downloadMulti` 生效**，`downloadParallel` 见到半截文件就降级单流（188-191）——这是设计取舍，不是 bug。
-- `provision.installQemu:1100` 传了 `{ resume: true }`，但 `download()` 根本没有 `resume` 选项（69），续传是自动的：**该参数是无效/历史遗留**。
-- `downloadMulti` 不处理 `opt.signal`（只有 `download()` 处理），取消多源下载目前只能靠超时/抛错。
-- `download()` 的 `416` 分支会 `break` 并把「已存在文件」当作完整文件（82-86）；若 `existing > total`（上次写坏）不会自愈，只有 `expectSha256` 能兜住。
-- `openStream` 的 `timeout: 30000` 是 socket 空闲超时，**没有单独 connect 超时**；DNS 卡住时靠外层 `measure/rank` 的定时器。
-- UA 在 `download.js:13` 是 `ApkStart/0.2`，`sources.js:64` 是 `ApkStart/0.3`，两处不一致（无功能影响，仅日志/服务端统计）。
-- 不变量：所有下载函数的 `onProgress` 在成功结束前一定会被调一次 `percent:100`（163、308、545），UI 不会停在 99%。
+- **Multi-source can only mix sources with "the same declared total size"** (371-381), otherwise it would stitch a corrupt file; when the sizes differ (GitHub and Gitee compress separately) it uses only the fastest.
+- **`c.rotates` must be explicitly initialized to 0** (comment at 415): `undefined < 2` is `false`, so the source-switch logic would never fire (a historical bug).
+- **Only one source switch is allowed per request** (459-463): after `destroy` a connection may still deliver buffered packets, which would re-trigger the switch and skip past sources.
+- **Resume only applies to `download()` and `downloadMulti`**; `downloadParallel` degrades to a single stream when it sees a partial file (188-191) — a design trade-off, not a bug.
+- `provision.installQemu:1100` passes `{ resume: true }`, but `download()` has no `resume` option at all (69); resume is automatic, so **that parameter is ineffective/legacy**.
+- `downloadMulti` does not handle `opt.signal` (only `download()` does); cancelling a multi-source download today is only possible through timeouts or errors.
+- The `416` branch of `download()` breaks and treats "the existing file" as complete (82-86); if `existing > total` (a previous bad write) it will not self-heal, and only `expectSha256` can catch it.
+- `openStream`'s `timeout: 30000` is a socket idle timeout; **there is no separate connect timeout**, so a stuck DNS lookup relies on the outer `measure/rank` timers.
+- The UA is `ApkStart/0.2` at `download.js:13` and `ApkStart/0.3` at `sources.js:64` — inconsistent (no functional impact, only logs/server statistics).
+- Invariant: every download function's `onProgress` is guaranteed to be called once with `percent:100` before a successful return (163, 308, 545), so the UI never parks at 99%.
 
-### 被谁调用
-- `src/core/provision.js:14`（require）、`:434` `downloadAny`（adb）、`:541` `downloadMulti`（运行时整包）、`:912` `downloadAnyParallel`（emulator）、`:1010`（play 镜像）、`:1052`（aehd）、`:1143`（ISO）、`:628-629`/`:1071-1072` `openStream`（抓索引/目录页）、`:1226-1228` `head`（`probeSources`）。
-- `src/core/updater.js:20,150`（`downloadMulti` 更新包）、`:198`（`downloadAnyParallel` 每个分片）。
-- `test/engine-test.js:32`；`test/boot-test.js:23,38`（真下 ISO，走 `test:boot`）。
+### Call sites
+- `src/core/provision.js:14` (require), `:434` `downloadAny` (adb), `:541` `downloadMulti` (runtime bundle), `:912` `downloadAnyParallel` (emulator), `:1010` (play image), `:1052` (aehd), `:1143` (ISO), `:628-629`/`:1071-1072` `openStream` (fetching indexes/directory pages), `:1226-1228` `head` (`probeSources`).
+- `src/core/updater.js:20,150` (`downloadMulti` for the update package), `:198` (`downloadAnyParallel` for each part).
+- `test/engine-test.js:32`; `test/boot-test.js:23,38` (really downloads the ISO, via `test:boot`).
 
-### 测试覆盖
+### Test coverage
 `test/engine-test.js`
-- ✓ `:83` 完整下载 + 跟随重定向
-- ✓ `:89` 断点续传（已有半截文件）
-- ✓ `:101` HEAD 探测 + SHA256
-- ✓ `:108` SHA256 校验失败会清理文件
-- ✓ `:118` 并行分块下载：多连接拼接内容一致
-- ✓ `:133` 源不支持 Range 时自动回退单流
+- yes `:83` full download + redirect following
+- yes `:89` resume (an existing partial file)
+- yes `:101` HEAD probe + SHA256
+- yes `:108` a failed SHA256 check cleans up the file
+- yes `:118` parallel chunked download: multiple connections produce identical content
+- yes `:133` falls back to a single stream when the source does not support Range
 
-`test/auto-test.js`（本地起 http 服务打真实字节）
-- ✓ `:995` 多源并行下载：两个源体积不同时跟最快的源走
-- ✓ `:1068` 不同分块从不同源拉，拼出来字节必须完全一致
-- ✓ `:1108` 失败后重来只补缺的块（边车）
-- ✓ `:1155` 连接建立后一个字节都不来，必须超时换源而不是挂死
-- ✓ `:1198` 某个源只跑几十 KB/s 时换源，而不是卡在最后几 % 不动
-- ✓ `:1251` 只有一条可用地址时退回单源分块
-- ✓ `:1033` 分片更新包按顺序拼回整包，大小不符立刻中止（`updater._downloadParts`）
+`test/auto-test.js` (starts a local HTTP server and transfers real bytes)
+- yes `:995` multi-source parallel download: when two sources differ in size, follow the fastest
+- yes `:1068` different chunks pulled from different sources must stitch into exactly the same bytes
+- yes `:1108` a retry after failure only fetches the missing chunks (sidecar)
+- yes `:1155` if not a single byte arrives after the connection is established, it must time out and switch sources instead of hanging
+- yes `:1198` switch source when one source runs at only tens of KB/s, instead of freezing at the last few percent
+- yes `:1251` falls back to single-source chunking when only one usable URL exists
+- yes `:1033` part update packages are stitched back in order and aborted immediately on a size mismatch (`updater._downloadParts`)
 
 ---
 
-## 3. `src/core/provision.js` — 运行时自举（adb / emulator / system image / qemu / aehd）
+## 3. `src/core/provision.js` — runtime bootstrap (adb / emulator / system image / qemu / aehd)
 
-### 职责
-不依赖第三方模拟器，把 adb、emulator、系统镜像、AEHD、QEMU、虚拟磁盘全部「下载→校验→解压/安装→落盘」，并统一管理这些文件该放哪（`paths()`）、够不够空间（`guardDisk`）、装没装好（`checkEnv`）。
+### Responsibility
+Without depending on a third-party emulator, take adb, emulator, system image, AEHD, QEMU and the virtual disk through "download → verify → extract/install → write to disk", and manage uniformly where those files go (`paths()`), whether there is enough space (`guardDisk`), and whether they are installed correctly (`checkEnv`).
 
-### 对外接口（`class Provisioner`，导出 `{Provisioner, SOURCES, MIN_SIZE, absUrl, baseOf}`）
+### Public interface (`class Provisioner`, exports `{Provisioner, SOURCES, MIN_SIZE, absUrl, baseOf}`)
 
-| 成员 | 签名 | 说明 |
+| Member | Signature | Notes |
 |---|---|---|
-| `constructor` | `(appRoot)` | 140-146；内部 `_sources = new Sources(() => store.getSettings())` |
-| `get sources` | `Sources` | 149-151，与 updater 共用同一套镜像/测速设置 |
-| `get root` | `string` | `settings.runtime.dir` 或 `%APPDATA%\apkstart\runtime`（192-195） |
-| `paths()` | `Paths` | 197-245，见下表 |
-| `ensureDirs()` | `Paths` | 建 root/qemu/platform-tools/images/_tmp/avdHome（247-253） |
-| `guardDisk` | `(component, targetDir) => Promise<freeMB>` | 不足直接抛中文错误（262-277） |
-| `hypervisor` | `() => Promise<{whpx,dll,hypervisorPresent,note}>` | 只做毫秒级文件检查（281-296） |
-| `adbVersion` / `qemuVersion` / `emulatorVersion` | `() => Promise<{ok,path,version}>` | 各带 30s 内存缓存（298-338、687-714） |
-| `inspectIso` | `(file) => {ok,iso9660,rawImage,size,reason,magic}` | 读 `0x8001` 处 `CD001`（341-365） |
-| `checkEnv` | `() => Promise<Env>` | 367-424，UI 的「状态」全靠它 |
+| `constructor` | `(appRoot)` | 140-146; internally `_sources = new Sources(() => store.getSettings())` |
+| `get sources` | `Sources` | 149-151, shares the mirror/speed settings with updater |
+| `get root` | `string` | `settings.runtime.dir` or `%APPDATA%\apkstart\runtime` (192-195) |
+| `paths()` | `Paths` | 197-245, see the table below |
+| `ensureDirs()` | `Paths` | Creates root/qemu/platform-tools/images/_tmp/avdHome (247-253) |
+| `guardDisk` | `(component, targetDir) => Promise<freeMB>` | Throws a plain error when space is low (262-277) |
+| `hypervisor` | `() => Promise<{whpx,dll,hypervisorPresent,note}>` | Only millisecond-level file checks (281-296) |
+| `adbVersion` / `qemuVersion` / `emulatorVersion` | `() => Promise<{ok,path,version}>` | Each with a 30s in-memory cache (298-338, 687-714) |
+| `inspectIso` | `(file) => {ok,iso9660,rawImage,size,reason,magic}` | Reads `CD001` at `0x8001` (341-365) |
+| `checkEnv` | `() => Promise<Env>` | 367-424; the UI's entire "status" view depends on it |
 | `installAdb` | `(onProgress) => {ok,path,version}` | 428-456 |
-| `resolveRuntimePack` | `() => {url,name,size,tag,page,from}` | 476-516，Gitee/GitHub 并发找 `ApkStart-runtime-*.zip` |
-| `installRuntimePack` | `(onProgress) => {ok,name,tag}` | 522-580，轻量版一键部署 |
-| `extractZip` | `(zipPath,destDir,{onEntry}) => destDir` | 591-622，>64MB 用文件版 zip、大条目流式 |
-| `resolveEmulatorUrl` / `resolveSysimgUrl` / `resolvePlayUrl` / `resolveQemuUrl` | `() => Promise<string>` | 从 Google 索引/目录页动态解析，落兜底常量 |
-| `materializeImages` | `(onLog) => Promise<count>` | 722-794，`.img.xz/.gz` → `.img`（只做一次） |
+| `resolveRuntimePack` | `() => {url,name,size,tag,page,from}` | 476-516; finds `ApkStart-runtime-*.zip` on Gitee/GitHub concurrently |
+| `installRuntimePack` | `(onProgress) => {ok,name,tag}` | 522-580; the lightweight edition's one-click deploy |
+| `extractZip` | `(zipPath,destDir,{onEntry}) => destDir` | 591-622; >64MB uses the file-based zip, large entries streamed |
+| `resolveEmulatorUrl` / `resolveSysimgUrl` / `resolvePlayUrl` / `resolveQemuUrl` | `() => Promise<string>` | Resolved dynamically from Google's index/directory pages, falling back to constants |
+| `materializeImages` | `(onLog) => Promise<count>` | 722-794; `.img.xz/.gz` → `.img` (only once) |
 | `systemImageInfo` / `playImageInfo` | `() => {ok,dir,size,api,tag?,note?}` | 797-839 / 972-980 |
-| `emulatorAccel` | `() => Promise<{ok,kind,note,...}>` | 845-902，`-accel-check` + 落盘缓存 |
+| `emulatorAccel` | `() => Promise<{ok,kind,note,...}>` | 845-902; `-accel-check` + on-disk cache |
 | `installEmulator` | `(onProgress) => {ok,path,version}` | 905-937 |
 | `ensurePlatformTools` / `adbVersionPath` | `() / () => bool / string` | 940-955 / 957-963 |
-| `installSystemImage` | `(onProgress)` | 966-969，等价于 `installPlayImage`（只有一份基础镜像） |
-| `installPlayImage` | `(onProgress) => playImageInfo` | 1004-1044，顺手清 `android-30` |
-| `installAehd` | `(onProgress) => {ok,dir,installer}` | 1047-1062，只下载不解安装 |
-| `installQemu` | `(onProgress) => {ok,path,version}` | 1090-1130，NSIS `/S /D=` 静默安装 |
-| `downloadIso` / `inspectImage` / `importIso` / `importDisk` | | 1134-1195（QEMU 路线） |
-| `createDisk` | `(sizeGB=24, onProgress)` | 1199-1220，`qemu-img create -f qcow2` |
-| `probeSources` | `() => {adb,qemu,iso}` | 1224-1231，HEAD 探测三个固定 URL |
-| `envCacheGet/Set`, `invalidateEnvCache`, `_envKey` | | 154-188，落盘环境探测缓存 |
+| `installSystemImage` | `(onProgress)` | 966-969, equivalent to `installPlayImage` (there is only one base image) |
+| `installPlayImage` | `(onProgress) => playImageInfo` | 1004-1044, also cleans up `android-30` |
+| `installAehd` | `(onProgress) => {ok,dir,installer}` | 1047-1062, downloads only, does not install |
+| `installQemu` | `(onProgress) => {ok,path,version}` | 1090-1130, NSIS `/S /D=` silent install |
+| `downloadIso` / `inspectImage` / `importIso` / `importDisk` | | 1134-1195 (QEMU route) |
+| `createDisk` | `(sizeGB=24, onProgress)` | 1199-1220, `qemu-img create -f qcow2` |
+| `probeSources` | `() => {adb,qemu,iso}` | 1224-1231, HEAD probes the three fixed URLs |
+| `envCacheGet/Set`, `invalidateEnvCache`, `_envKey` | | 154-188, on-disk environment probe cache |
 
-`paths()` 返回（225-245）：
+`paths()` returns (225-245):
 
 ```js
 { root, qemuDir, qemuExe, qemuImg,
   adbDir, adbExe,
   emulatorDir, emulatorExe,
-  sysImgRoot,                       // ★ 见下方三分支
+  sysImgRoot,                       // ★ see the three branches below
   sysImgDir: <sysImgRoot>/android-34/google_apis_playstore/x86_64,
   avdHome, aehdDir,
   imagesDir, iso, disk, tmp,
   sysTag:'google_apis_playstore', sysApi:'34', sysAbi:'x86_64' }
 ```
 
-`checkEnv()` 返回（387-423）：
+`checkEnv()` returns (387-423):
 
 ```js
 { adb:{ok,path,version,required}, emulator:{ok,path,version,required,note},
@@ -269,57 +269,57 @@ main.js ──> engine.js ──> provision.js ──> sources.js ──> versio
   disk:{ok,path,size,note}, hypervisor:{...},
   ready, engine:'emulator'|'qemu'|'none', paths }
 ```
-`ready = adb.ok && (emulatorReady || qemuReady)`；`emulatorReady = emulator.ok && (sysimg.ok || playImage.ok)`（384、420）。
+`ready = adb.ok && (emulatorReady || qemuReady)`; `emulatorReady = emulator.ok && (sysimg.ok || playImage.ok)` (384, 420).
 
-### 关键实现
+### Key internals
 
-**1) `paths()` 的三条路径规则（197-245）——这是「镜像到底落在哪个盘」的唯一权威**
+**1) The three path rules in `paths()` (197-245) — the single authority on "which drive the images land on"**
 
-- `root`：`settings.runtime.dir`，空则 `%APPDATA%\apkstart\runtime`（192-195）。
-- `avdHome`（237）：`settings.runtime.avdDir`，否则**若 root 不在 `DATA_DIR` 下**就用 `<DATA_DIR>/avd`，否则 `<root>/avd`（202-209）。理由（202-206）：单文件发行版的运行时被解到临时目录，AVD 放进去等于每次退出丢应用。
-- `sysImgRoot` 三分支（217-224）：
-  1. `<root>/system-images` 已存在 → 用它（整包解压产物）；
-  2. 否则 `<DATA_DIR>/system-images` 存在 → 用它（老用户/单文件发行版布局）；
-  3. 两处都没有 → **落 `<root>/system-images`**（全新安装；注释说明 CI 组装运行时靠这个，且 `DATA_DIR` 可能被重定向到临时目录）。
+- `root`: `settings.runtime.dir`, or `%APPDATA%\apkstart\runtime` when empty (192-195).
+- `avdHome` (237): `settings.runtime.avdDir`; failing that, **if root is not under `DATA_DIR`** use `<DATA_DIR>/avd`, otherwise `<root>/avd` (202-209). The reason (202-206): a single-file release unpacks its runtime into a temp directory, and putting AVDs there would lose every app on exit.
+- `sysImgRoot`, three branches (217-224):
+  1. `<root>/system-images` exists → use it (the bundle extraction product);
+  2. otherwise `<DATA_DIR>/system-images` exists → use it (old users / single-file release layout);
+  3. neither exists → **land in `<root>/system-images`** (fresh install; the comment notes CI assembles the runtime this way and that `DATA_DIR` may be redirected to a temp directory).
 
-**2) `materializeImages()`（722-794）**
-- 源目录固定 `<root>/system-images`（723），**目标目录 `this.paths().sysImgRoot`**（726），注释明确要求两者用同一套规则，否则出现「整包解到 D 盘、镜像又展开回 C 盘 AppData」（实测 1.2GB + 3.3GB 并存）。
-- 遍历：`.img.xz` 优先于 `.img.gz`（`found` Map，729-741）；其它文件（`kernel-ranchu` / `ramdisk.img` / 未压缩 `.img`）**必须一并复制**（728、751-760），否则模拟器报「还差系统镜像」。
-- 已展开判定：`fileSize(dest) > 32MB` 跳过（765）。
-- `.xz` 解压必须绕过包的 ESM 入口（771-781）：`require.resolve('@napi-rs/lzma')` 取目录再 `require(dir/index.js)`，注释说明 Electron 的 Node 20 不支持 `require('stream-polyfill.mjs')`，且 `exports` 不允许直接写 `/index.js`。
-- 单个镜像失败只 `onLog('展开镜像失败：…')`（790），**不向上抛**。
+**2) `materializeImages()` (722-794)**
+- The source directory is fixed at `<root>/system-images` (723) while **the destination is `this.paths().sysImgRoot`** (726); the comment explicitly requires both to follow the same rules, otherwise you get "the bundle extracted to D: while the images expanded back to C: AppData" (measured once: 1.2GB + 3.3GB coexisting).
+- Walk: `.img.xz` takes precedence over `.img.gz` (the `found` Map, 729-741); other files (`kernel-ranchu` / `ramdisk.img` / uncompressed `.img`) **must be copied as well** (728, 751-760), otherwise the emulator reports "system image missing".
+- "Already expanded" test: `fileSize(dest) > 32MB` skips (765).
+- `.xz` extraction must bypass the package's ESM entry (771-781): `require.resolve('@napi-rs/lzma')` to get the directory, then `require(dir/index.js)`; the comment explains that Electron's Node 20 does not support `require('stream-polyfill.mjs')` and that `exports` does not allow writing `/index.js` directly.
+- A single failed image only calls `onLog('failed to expand image: …')` (790) and **does not throw upwards**.
 
-**3) `installRuntimePack()`（522-580）——轻量版的「一键」**
-- `resolveRuntimePack()`：自定义 `settings.runtime.runtimePackUrl` 优先（477-478，`size:0`）；结果缓存到 `this._cache.pack`，**never invalidated**（479、514）；
-- 并发问 GitHub/Gitee 的 `releases?per_page=15`，找 `assets` 里 `/^ApkStart-runtime-.*\.zip$/i`，按 `cmpVer` 取最高 tag（487-515）；
-- `guardDisk('runtime', p.root)`（525）→ **`'runtime'` 不在 `need` 表里**，落到 default 512MB + 1024MB buffer = 1536MB（264-266）；
-- `rank(this._downloadUrls(pack.url))` 测速（534-536），失败退回原候选；
-- `downloadMulti(urls, tmp/runtime-pack.zip, {connections: settings.runtime.downloadConnections||8})`（529、541-555）；**
-  进度映射 `percent = clamp(1..90, pct*0.9)`**（551）；
-- 体积闸门：`< 200MB` 抛「运行时整包下载不完整，可重试续传」（556）；
-- `extractZip(zip, p.root, {onEntry})`（559-565），进度 91→99；
-- 写标记 `<root>/.runtime-pack.json`（`{name,tag,at,from}`）并删 zip（566-571）；
-- **立刻** `materializeImages(...).catch(() => 0)`（573-576），注释说明否则紧接着的 `checkEnv()` 会认为没装镜像、又去 Google 下一套 1.4GB；
-- 返回 `{ok,name,tag}`，进度 100。
+**3) `installRuntimePack()` (522-580) — the lightweight edition's "one click"**
+- `resolveRuntimePack()`: a custom `settings.runtime.runtimePackUrl` wins (477-478, `size:0`); the result is cached in `this._cache.pack` and **never invalidated** (479, 514);
+- Concurrently queries GitHub/Gitee `releases?per_page=15`, looks for `/^ApkStart-runtime-.*\.zip$/i` among `assets`, and takes the highest tag by `cmpVer` (487-515);
+- `guardDisk('runtime', p.root)` (525) → **`'runtime'` is not in the `need` table**, so it falls to the default 512MB + 1024MB buffer = 1536MB (264-266);
+- `rank(this._downloadUrls(pack.url))` speed test (534-536), falling back to the original candidates on failure;
+- `downloadMulti(urls, tmp/runtime-pack.zip, {connections: settings.runtime.downloadConnections||8})` (529, 541-555); **
+  progress mapping `percent = clamp(1..90, pct*0.9)`** (551);
+- Size gate: `< 200MB` throws "runtime bundle download incomplete, retry/resume"(556);
+- `extractZip(zip, p.root, {onEntry})` (559-565), progress 91→99;
+- Writes the marker `<root>/.runtime-pack.json` (`{name,tag,at,from}`) and deletes the zip (566-571);
+- **Immediately** calls `materializeImages(...).catch(() => 0)` (573-576); the comment explains that otherwise the following `checkEnv()` would think no image is installed and download another 1.4GB from Google;
+- Returns `{ok,name,tag}`, progress 100.
 
-**4) `extractZip()`（591-622）**
-- `fileSize > 64MB` → `new ZipFile(path)`（不整包进内存）；否则 `new ZipArchive(fs.readFileSync(...))`；
-- 单个条目 `uncompSize > 64MB` 走 `zip.pipeTo()` 流式，其余 `fs.writeFileSync(zip.read())`；
-- `finally { zip.close() }`（618-620）。
+**4) `extractZip()` (591-622)**
+- `fileSize > 64MB` → `new ZipFile(path)` (no whole-package load); otherwise `new ZipArchive(fs.readFileSync(...))`;
+- A single entry with `uncompSize > 64MB` goes through streaming `zip.pipeTo()`, the rest use `fs.writeFileSync(zip.read())`;
+- `finally { zip.close() }` (618-620).
 
-**5) `checkEnv()`（367-424）**：`Promise.all` 起 5 个探测（adb/qemu/hypervisor/emulator/accel），再叠加 `inspectIso`、`fileSize(disk)`、`systemImageInfo()`、`playImageInfo()`；`sysimg.ok` 被定义为 `systemImageInfo().ok || playImageInfo().ok`（381-399）。
+**5) `checkEnv()` (367-424)**: `Promise.all` starts 5 probes (adb/qemu/hypervisor/emulator/accel), then adds `inspectIso`, `fileSize(disk)`, `systemImageInfo()` and `playImageInfo()`; `sysimg.ok` is defined as `systemImageInfo().ok || playImageInfo().ok` (381-399).
 
-**6) 环境探测落盘缓存（126-188）**
-- 文件：`%APPDATA%\apkstart\cache\env.json`（129-131）；
-- key = `exe 路径 + exe(size:mtime) + aehd.sys(size:mtime) + WinHvPlatform.dll 存在与否`（154-162）；
-- TTL：可用结论 6h（126），**不可用只信 10 分钟**（127，用户可能刚开了虚拟化）；
-- 开机失败时 `invalidateEnvCache()` 由 emulator 调用（`emulator.js:848,886`）。
+**6) On-disk environment probe cache (126-188)**
+- File: `%APPDATA%\apkstart\cache\env.json` (129-131);
+- key = `exe path + exe(size:mtime) + aehd.sys(size:mtime) + whether WinHvPlatform.dll exists` (154-162);
+- TTL: a positive conclusion lasts 6h (126), while **a negative one is trusted for only 10 minutes** (127; the user may have just enabled virtualization);
+- On boot failure the emulator calls `invalidateEnvCache()` (`emulator.js:848,886`).
 
-**7) `emulatorAccel()`（845-902）**：解析 `-accel-check` 文本；三条兜底规则：`emulator-check` 缺失但有 `aehd.sys` → 判可用（879-883，注释说明「避免误判无加速而强行 `-accel off`，软件模拟在部分机器上直接崩溃」）；`hasAehdFile && /aehd/` → 可用（884）；`hv.dll && /whpx/` → 可用（886）；否则 `viaTcg: true`（888-897）。
+**7) `emulatorAccel()` (845-902)**: parses the `-accel-check` text; three fallback rules: `emulator-check` missing but `aehd.sys` present → usable (879-883; the comment explains this avoids misreading "no acceleration" and forcing `-accel off`, since software emulation crashes outright on some machines); `hasAehdFile && /aehd/` → usable (884); `hv.dll && /whpx/` → usable (886); otherwise `viaTcg: true` (888-897).
 
-**8) 磁盘守卫 `guardDisk()`（262-277）**
+**8) Disk guard `guardDisk()` (262-277)**
 
-| component | need(MB) | + buffer 1024MB |
+| component | need(MB) | + 1024MB buffer |
 |---|---|---|
 | adb | 64 | 1088 |
 | emulator | 600 | 1624 |
@@ -327,76 +327,76 @@ main.js ──> engine.js ──> provision.js ──> sources.js ──> versio
 | qemu | 320 | 1344 |
 | iso | 1100 | 2124 |
 | aehd | 64 | 1088 |
-| 未列（如 `'runtime'`） | 512 | **1536** |
+| unlisted (e.g. `'runtime'`) | 512 | **1536** |
 
-不足时抛：「目标磁盘空间不足：该组件约需 N MB…把『运行时数据目录』改到空间更大的盘（设置 → 系统集成 → 运行时数据目录 → 浏览）」。
+When space is insufficient it throws: "not enough space on the target disk: this component needs about N MB… change the 'runtime data directory' to a drive with more space (Settings → System integration → Runtime data directory → Browse)".
 
-### 坑点与不变量
+### Pitfalls and invariants
 
-- **镜像落点必须与 `paths().sysImgRoot` 一致**：`installPlayImage` 解到 `p.sysImgRoot`（1023），`materializeImages` 目标 `paths().sysImgRoot`（726），`playImageInfo` 查 `p.sysImgRoot`（974）。任何新代码若自己拼 `<DATA_DIR>/system-images` 就会复现「设了运行时目录还是下到 AppData」。
-- **`guardDisk('runtime')` 的估算偏低**：512+1024=1536MB，而实际是「1.5GB 包 + 落盘 zip + 解出 3.3GB system.img + .xz 展开」。小盘机器会在解压阶段失败并留下半截文件（`installRuntimePack` 没有清理半截 zip 的逻辑，靠下一次续传）。
-- **`this._cache.pack` / `emulatorUrl` / `sysimgUrl` / `playUrl` 没有失效入口**：`main.js:819-825` 只 `sources.reset()`。用户在设置里改了 `sourcePreference` 或换了整包地址，同一进程内仍用旧地址（`runtimePackUrl` 例外，因为每次先读设置，477）。
-- **`materializeImages` 的失败被两处吞掉**：自身 `.catch(e => onLog(...))`（790）＋调用方 `.catch(() => 0)`（576）。`@napi-rs/lzma` 缺失/被杀软拦截 → 镜像永远展不开 → `checkEnv().sysimg.ok === false` → 每次启动都重新走「下载运行时」路径（典型「卡在准备运行时」）。
-- **`emulatorVersion()` 失败不缓存**（687-714）：`ok:false` 直接 return，没有 `envCacheSet`，也没有 30s 内存缓存；每次 `checkEnv()` 都会 `execFile(emulator.exe -version)` 最多 20s。成功路径才写缓存（707-710）。
-- **`emulatorVersion` 缓存只在内存/落盘，`_cache.emulatorVerAt` 只在成功时设置**，失败路径会让状态轮询反复拉起进程。
-- **`extractZip` 不校验 zip-slip**：`path.join(destDir, name)` 直接拼（606）；`updater._extract` 有 `startsWith(path.resolve(dest))` 防护（updater:237），两边不一致。运行时整包与更新包都来自本项目 release，风险低，但接手者别把 `extractZip` 用到不可信输入上。
-- **`resolveRuntimePack()` 的自定义地址 `size: 0`**，下载进度只能靠探测或已收字节；`installRuntimePack` 里 `total` 也因此为 0，`mb` 文案会缺「/ 总大小」。
-- **`installAdb` 解压到 `p.root`**（446），zip 顶层就是 `platform-tools/`；`installEmulator` 同理（926）。所以 root 同时是 `ANDROID_SDK_ROOT`（232-234 注释）。
-- **`ensurePlatformTools()`（939-955）**：emulator 要求 SDK root 下有 `platform-tools`，否则 FATAL；它从 `engine/platform-tools`、`tools/platform-tools`、`settings.adbPath` 所在目录复制 3 个文件（`adb.exe` + 两个 dll）。
-- **`installAehd` 只下载**（1047-1062），安装要管理员：`main.js:1121-1200` 走 `silent_install.bat` + UAC。
-- **QEMU 安装**：NSIS `/S /D=<dir>`，`/D` 必须最后且不加引号（1112-1116）；`setTimeout` 600s 后强杀（1119）。
-- **`systemImageInfo()`（797-839）**：先在 `paths().sysImgDir` 找，再把 `sysImgRoot`、`<root>/system-images`、`<appRoot>/engine/system-images` 下所有 `android-*/tag/abi` 枚举一遍（按 API 降序），任何一套 `system.img > 300MB` 且有 `kernel-ranchu` 就算 ok。这是「完整版可能只带更小的 AOSP 镜像」的兼容点。
-- **`playImageInfo()` 与 `sysimg.ok` 的关系**：`checkEnv().sysimg.ok` 把两者或起来（390-399），但 `engine.ensure()` 用的是 `env.sysimg.ok`（`engine.js:852`），所以只有 play 镜像也能启动。
-- **不变量**：所有 `install*` 的 `onProgress` 都以 `{stage:'download'|'extract'|'install'|'done', percent}` 形式汇报，`main.js:317` 统一加 `component`，UI 侧 `app.js:357 updateStepProgress` 只读 `percent/message`。
-- `SOURCES` 里硬编码的兜底版本会过期（`emulator-windows_x64-16847572.zip`、`x86_64-34_r14.zip`，27-41），只在索引抓不到时使用。
+- **The image destination must match `paths().sysImgRoot`**: `installPlayImage` extracts to `p.sysImgRoot` (1023), `materializeImages` targets `paths().sysImgRoot` (726), and `playImageInfo` looks in `p.sysImgRoot` (974). Any new code that builds `<DATA_DIR>/system-images` itself will reproduce "I set the runtime directory but it still downloads to AppData".
+- **`guardDisk('runtime')` underestimates**: 512+1024=1536MB, while the reality is "1.5GB package + the zip on disk + 3.3GB of extracted system.img + .xz expansion". A small drive fails during extraction and leaves a partial file (`installRuntimePack` has no cleanup logic for a partial zip; it relies on the next resume).
+- **`this._cache.pack` / `emulatorUrl` / `sysimgUrl` / `playUrl` have no invalidation entry**: `main.js:819-825` only calls `sources.reset()`. If the user changes `sourcePreference` or a bundle URL in settings, the old address is still used within the same process (`runtimePackUrl` is the exception, because settings are read first every time, 477).
+- **`materializeImages` failures are swallowed in two places**: its own `.catch(e => onLog(...))` (790) and the caller's `.catch(() => 0)` (576). A missing `@napi-rs/lzma` or an antivirus block → the image never expands → `checkEnv().sysimg.ok === false` → every start re-enters the "download runtime" path (the classic "stuck preparing runtime").
+- **A failed `emulatorVersion()` is not cached** (687-714): it returns `ok:false` directly with no `envCacheSet` and no 30s memory cache; every `checkEnv()` runs `execFile(emulator.exe -version)` for up to 20s. Only the success path writes the cache (707-710).
+- **The `emulatorVersion` cache lives only in memory/on disk and `_cache.emulatorVerAt` is set only on success**; the failure path makes status polling spawn the process over and over.
+- **`extractZip` does not check for zip-slip**: `path.join(destDir, name)` is joined directly (606), while `updater._extract` has a `startsWith(path.resolve(dest))` guard (updater:237) — the two differ. The runtime bundle and update package both come from this project's releases so the risk is low, but do not feed untrusted input into `extractZip`.
+- **The custom address in `resolveRuntimePack()` has `size: 0`**, so download progress can only come from probing or bytes received; `total` is therefore 0 in `installRuntimePack` and the MB text lacks "/ total size".
+- **`installAdb` extracts into `p.root`** (446) and the zip's top level is `platform-tools/`; `installEmulator` does the same (926). So root doubles as `ANDROID_SDK_ROOT` (comment at 232-234).
+- **`ensurePlatformTools()` (939-955)**: the emulator requires `platform-tools` under the SDK root, otherwise FATAL; it copies 3 files (`adb.exe` + two dlls) from `engine/platform-tools`, `tools/platform-tools`, or the directory of `settings.adbPath`.
+- **`installAehd` only downloads** (1047-1062); installing needs admin: `main.js:1121-1200` goes through `silent_install.bat` + UAC.
+- **QEMU install**: NSIS `/S /D=<dir>`, where `/D` must be last and unquoted (1112-1116); a `setTimeout` force-kills it after 600s (1119).
+- **`systemImageInfo()` (797-839)**: first looks in `paths().sysImgDir`, then enumerates every `android-*/tag/abi` under `sysImgRoot`, `<root>/system-images` and `<appRoot>/engine/system-images` (by API descending); any set with `system.img > 300MB` and a `kernel-ranchu` counts as ok. This is the compatibility point for "the full edition may ship only a smaller AOSP image".
+- **`playImageInfo()` and `sysimg.ok`**: `checkEnv().sysimg.ok` ORs the two (390-399), but `engine.ensure()` uses `env.sysimg.ok` (`engine.js:852`), so having only the play image is enough to boot.
+- **Invariant**: every `install*` reports `onProgress` as `{stage:'download'|'extract'|'install'|'done', percent}`; `main.js:317` uniformly adds `component`, and the UI's `app.js:357 updateStepProgress` reads only `percent/message`.
+- The fallback versions hardcoded in `SOURCES` will go stale (`emulator-windows_x64-16847572.zip`, `x86_64-34_r14.zip`, 27-41); they are used only when the index cannot be fetched.
 
-### 被谁调用
-- `src/core/engine.js:16,54`（`new Provisioner(appRoot)`）、`:79,202,393,995`（`paths()`）、`:109,235,368,635,849,996`（`checkEnv`）、`:264,761`（`emulatorAccel`）、`:639`（`createDisk`）、`:848`（`materializeImages`）、`:1017,1021`（`paths().root` → layers）、`:873`（`needsSetup`）。
-- `src/core/emulator.js:17,29`、`:53,225`（`paths`/`ensureDirs`）、`:56,63`（`systemImageInfo`）、`:62,723`（`playImageInfo`）、`:659`（`adbVersionPath`）、`:761-762`（`emulatorAccel`+`emulatorVersion`）、`:848,886`（`invalidateEnvCache`）。
-- `src/core/installer.js:95-99`（`playImageInfo` + `installPlayImage`，首次遇到 ARM 应用按需下）；`:159,169,190,489`（`playImageInfo` 判定）。
-- `src/main.js`：`:314-354`（`autoDeploy` 主流程）、`:707`（`paths().root` 给 UI）、`:824`（`sources.reset`）、`:898,932,939,946,953,964,977`（自检/诊断）、`:1076-1269`（各 `provision:*` IPC）、`:1330,1542`（`avdHome`/`root`）、`:1631`（预热前 `checkEnv`）。
-- `test/engine-test.js:146-220,391-401`、`test/auto-test.js:1347-1350`、`test/boot-test.js:44`。
+### Call sites
+- `src/core/engine.js:16,54` (`new Provisioner(appRoot)`), `:79,202,393,995` (`paths()`), `:109,235,368,635,849,996` (`checkEnv`), `:264,761` (`emulatorAccel`), `:639` (`createDisk`), `:848` (`materializeImages`), `:1017,1021` (`paths().root` → layers), `:873` (`needsSetup`).
+- `src/core/emulator.js:17,29`, `:53,225` (`paths`/`ensureDirs`), `:56,63` (`systemImageInfo`), `:62,723` (`playImageInfo`), `:659` (`adbVersionPath`), `:761-762` (`emulatorAccel`+`emulatorVersion`), `:848,886` (`invalidateEnvCache`).
+- `src/core/installer.js:95-99` (`playImageInfo` + `installPlayImage`, downloaded on demand the first time an ARM app appears); `:159,169,190,489` (`playImageInfo` checks).
+- `src/main.js`: `:314-354` (the `autoDeploy` main flow), `:707` (`paths().root` for the UI), `:824` (`sources.reset`), `:898,932,939,946,953,964,977` (self-check/diagnostics), `:1076-1269` (the `provision:*` IPC handlers), `:1330,1542` (`avdHome`/`root`), `:1631` (`checkEnv` before prewarm).
+- `test/engine-test.js:146-220,391-401`, `test/auto-test.js:1347-1350`, `test/boot-test.js:44`.
 
-### 测试覆盖
+### Test coverage
 `test/engine-test.js`
-- ✓ `:149` 默认运行时目录位于数据目录下
-- ✓ `:156` 空环境检查：adb 未就绪，组件结构完整
-- ✓ `:166` 内置 ZIP 解压可用
-- ✓ `:197` SDK 索引里的相对 url 会被补全成绝对地址（`absUrl`/`baseOf`）
-- ✓ `:211` 解析出的 emulator / 系统镜像地址都是可下载的绝对 URL
-- ✓ `:244` 镜像校验：区分有效 ISO9660 / 损坏 / 未下完（`inspectIso`）
-- ✓ `:391` `playImageInfo` 校验 API 34 兼容镜像完整性
+- yes `:149` the default runtime directory is inside the data directory
+- yes `:156` empty-environment check: adb not ready, component structure complete
+- yes `:166` built-in ZIP decompression works
+- yes `:197` relative URLs from the SDK index are expanded into absolute ones (`absUrl`/`baseOf`)
+- yes `:211` the resolved emulator / system-image URLs are absolute downloadable URLs
+- yes `:244` image validation: distinguishes valid ISO9660 / corrupt / incomplete (`inspectIso`)
+- yes `:391` `playImageInfo` validates the completeness of the API 34 compatible image
 
 `test/auto-test.js`
-- ✓ `:1339` **系统镜像落点：全新安装必须落在运行时目录**（覆盖 `paths().sysImgRoot` 三分支）
+- yes `:1339` **system-image destination: a fresh install must land in the runtime directory** (covers all three branches of `paths().sysImgRoot`)
 
-`test/boot-test.js:44` 起真实 `checkEnv` + 真机启动（`npm run test:boot`，不联网也能跑但要 ISO）。
+`test/boot-test.js:44` runs a real `checkEnv` + a real boot (`npm run test:boot`, works offline but needs the ISO).
 
-**未覆盖**：`installRuntimePack`、`resolveRuntimePack`、`materializeImages`、`installAdb/installEmulator/installPlayImage/installAehd/installQemu`、`guardDisk` 全都没有单测（都需要真实网络/大文件）。
+**Uncovered**: `installRuntimePack`, `resolveRuntimePack`, `materializeImages`, `installAdb/installEmulator/installPlayImage/installAehd/installQemu` and `guardDisk` have no unit tests at all (all need real network/large files).
 
 ---
 
-## 4. `src/core/updater.js` — 在线更新（check / prepare / apply）
+## 4. `src/core/updater.js` — online update (check / prepare / apply)
 
-### 职责
-从本仓库 GitHub/Gitee Releases 取最新版本，按安装形态挑资产、下载并组装载荷，生成一段 PowerShell 覆盖脚本在进程退出后执行「替换 + 重启」。
+### Responsibility
+Gets the latest version from this repository's GitHub/Gitee Releases, picks an asset by install flavor, downloads and assembles the payload, and generates a PowerShell overwrite script that performs "replace + restart" after the process exits.
 
-### 对外接口（导出 `{Updater, cmpVer, OWNER, REPO}`）
+### Public interface (exports `{Updater, cmpVer, OWNER, REPO}`)
 
-| 成员 | 签名 | 说明 |
+| Member | Signature | Notes |
 |---|---|---|
-| `constructor` | `({currentVersion, exePath, isPackaged, dataDir, settings?, onProgress?})` | 38-50；`this.installDir = dirname(exePath)`，`this.sources = new Sources(settings)` |
-| `get flavor` | `'setup' \| 'portable'` | 53-59：`installDir` 下有 `Uninstall *.exe` → `setup` |
+| `constructor` | `({currentVersion, exePath, isPackaged, dataDir, settings?, onProgress?})` | 38-50; `this.installDir = dirname(exePath)`, `this.sources = new Sources(settings)` |
+| `get flavor` | `'setup' \| 'portable'` | 53-59: `Uninstall *.exe` in `installDir` → `setup` |
 | `get updateDir` | `<dataDir>/update` | 61-63 |
-| `check` | `({force=false}) => Promise<Latest>` | 73-115，见下 |
+| `check` | `({force=false}) => Promise<Latest>` | 73-115, see below |
 | `prepare` | `(info?) => Promise<{mode:'zip'\|'setup', payload, version}>` | 121-176 |
-| `_downloadParts` | `(asset, target, conns, total)` | 182-227，分片下载 + 顺序拼接 |
-| `_extract` | `(zipPath, dest)` | 229-251，带 zip-slip 防护、逐条流式 |
-| `apply` | `(job, {waitPid?, spawn?}) => true \| script` | 258-325；`spawn:false` 时只返回脚本（测试用） |
+| `_downloadParts` | `(asset, target, conns, total)` | 182-227, per-part download + sequential stitching |
+| `_extract` | `(zipPath, dest)` | 229-251, with zip-slip protection, streaming entry by entry |
+| `apply` | `(job, {waitPid?, spawn?}) => true \| script` | 258-325; with `spawn:false` it only returns the script (for tests) |
 | `static repoUrl()` | `() => 'https://github.com/RoutineMiku/apkstart/releases'` | 328-330 |
-| `cmpVer` | re-export 自 `version.js` | 333 |
+| `cmpVer` | re-exported from `version.js` | 333 |
 
-`check()` 返回（82-112）：
+`check()` returns (82-112):
 
 ```js
 { version, tag, name, notes, htmlUrl, publishedAt,
@@ -404,362 +404,362 @@ main.js ──> engine.js ──> provision.js ──> sources.js ──> versio
   assets, sources, unreachable,
   flavor, hasUpdate, current, canAutoApply }
 ```
-`asset` 挑选（77-80）：
-- `setup`：`/Setup\.exe$/i` → 兜底 `/win.*\.exe$/i`
-- `portable`：`/portable.*\.zip$/i` → `/win64.*\.zip$/i` → **`/\.zip$/i`**
-`hasUpdate = cmpVer(merged.tag, current) > 0`（109）；`canAutoApply = !!asset && (asset.url || asset.parts?.length)`（111）。
+`asset` selection (77-80):
+- `setup`: `/Setup\.exe$/i` → fallback `/win.*\.exe$/i`
+- `portable`: `/portable.*\.zip$/i` → `/win64.*\.zip$/i` → **`/\.zip$/i`**
+`hasUpdate = cmpVer(merged.tag, current) > 0` (109); `canAutoApply = !!asset && (asset.url || asset.parts?.length)` (111).
 
-### 关键实现
+### Key internals
 
-**1) `check()`（73-115）** 只做「元数据 + 挑资产」，下载地址在 `prepare()` 里才测速。`force` 透传给 `sources.latest`。
+**1) `check()` (73-115)** only does "metadata + pick asset"; download URLs are speed-tested later in `prepare()`. `force` is passed through to `sources.latest`.
 
-**2) `prepare()`（121-176）**
-- 载荷目录 `<dataDir>/update/<version>/`；
-- 有 `asset.parts` → `_downloadParts`（133-134）；
-- 否则 `candidates(asset)` → `rank()` → `downloadMulti(ranked, file, {connections})`（136-163）；
-- **进度总大小的取法**：`sizes[url]` 按 `ranked` 顺序找第一个已知的（142-147），注释说明拿错会「一直显示 92% 再突然跳到完成」；
-- `.zip` → 解到 `payload/` → `{mode:'zip',payload:out}`；其余 → `{mode:'setup',payload:file}`（166-175）。
+**2) `prepare()` (121-176)**
+- Payload directory `<dataDir>/update/<version>/`;
+- With `asset.parts` → `_downloadParts` (133-134);
+- Otherwise `candidates(asset)` → `rank()` → `downloadMulti(ranked, file, {connections})` (136-163);
+- **How the progress total is picked**: scan `sizes[url]` in `ranked` order and take the first known value (142-147); the comment notes that picking wrong makes it "show 92% forever, then suddenly jump to complete";
+- `.zip` → extract to `payload/` → `{mode:'zip',payload:out}`; anything else → `{mode:'setup',payload:file}` (166-175).
 
-**3) `_downloadParts()`（182-227）**：每个分片单独 `candidates + rank`（可以一部分走 Gitee、一部分走镜像），`downloadAnyParallel` 到 `<name>.<index>.tmp`，校验 `part.size`（若已知，211-216），`fs.writeSync(fd, buf, 0, len, doneBytes)` 顺序落盘，最后校验 `doneBytes === total`（224-226）。整片 `readFileSync` 进内存（213）——分片 ≤100MiB，可接受。
+**3) `_downloadParts()` (182-227)**: each part gets its own `candidates + rank` (so some can come from Gitee and some from a mirror), `downloadAnyParallel` into `<name>.<index>.tmp`, verifies `part.size` (when known, 211-216), writes sequentially with `fs.writeSync(fd, buf, 0, len, doneBytes)`, and finally verifies `doneBytes === total` (224-226). Each whole part is `readFileSync`ed into memory (213) — parts are ≤100MiB, which is acceptable.
 
-**4) `apply()`（258-325）—— 更新链最关键的一段**
-生成的脚本（`lines`，265-307）依次：
-1. `$ErrorActionPreference='SilentlyContinue'`，`Note()` 写 `<updateDir>/update.log`；
-2. `Wait-Process -Id <waitPid> -Timeout 90` + `Sleep 700ms`（270-272）；
-3. `mode==='zip'`：`Copy-Item -Recurse -Force` **最多 12 轮**，每轮用「目标 exe 是否存在」当探针，失败 `Sleep 600ms`（275-290）；之后 `Remove-Item $src`（解压目录，289）；
-4. `mode==='setup'`：`Start-Process -ArgumentList '/S' -Wait` 并记录 exit code（291-298）；
-5. 重新拉起 `exe`（300-301）；
-6. `Remove-Item <updateDir>/<version> -Recurse -Force`，最后 **`exit 0`**（304-306，注释：清理失败不应让调用方以为更新失败）。
+**4) `apply()` (258-325) — the most critical piece of the update chain**
+The generated script (`lines`, 265-307) does, in order:
+1. `$ErrorActionPreference='SilentlyContinue'`, `Note()` writes `<updateDir>/update.log`;
+2. `Wait-Process -Id <waitPid> -Timeout 90` + `Sleep 700ms` (270-272);
+3. `mode==='zip'`: `Copy-Item -Recurse -Force` **up to 12 rounds**, each round probing "does the target exe exist", sleeping 600ms on failure (275-290); then `Remove-Item $src` (the extracted directory, 289);
+4. `mode==='setup'`: `Start-Process -ArgumentList '/S' -Wait` and record the exit code (291-298);
+5. Relaunch `exe` (300-301);
+6. `Remove-Item <updateDir>/<version> -Recurse -Force`, then **`exit 0`** (304-306; the comment says a failed cleanup must not make the caller think the update failed).
 
-启动方式（309-324）：
-- 脚本先落盘 `update/apply.log.ps1` 便于排障（310）；
-- 真正执行用 `-EncodedCommand`（UTF-16LE base64，313），注释说明**绕开 PS 5.1 按 ANSI/GBK 解码无 BOM 脚本**导致中文路径乱码；
-- **不能 `detached`**（315-318）：某些安全软件/沙箱会拦「分离的控制台进程」，表现为脚本压根没跑（界面上「正在替换程序并重启」卡住）；改用普通子进程 + `child.unref()`；
-- `spawn(ps, ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-EncodedCommand',b64], {stdio:'ignore', windowsHide:true})`。
+How it is launched (309-324):
+- The script is first written to `update/apply.log.ps1` for troubleshooting (310);
+- The real execution uses `-EncodedCommand` (UTF-16LE base64, 313); the comment explains this **avoids PS 5.1 decoding a BOM-less script as ANSI/GBK**, which garbles non-ASCII paths;
+- **It must not be `detached`** (315-318): some security software/sandboxes block "a detached console process", with the symptom that the script never runs at all (the UI sits at "replacing the program and restarting"); a normal child process + `child.unref()` is used instead;
+- `spawn(ps, ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-EncodedCommand',b64], {stdio:'ignore', windowsHide:true})`.
 
-### 坑点与不变量
+### Pitfalls and invariants
 
-- **安装版 vs 便携版靠「安装目录里有没有 `Uninstall *.exe`」判定**（53-59），没有其它标记；NSIS 静默覆盖安装，便携版靠复制覆盖。
-- **覆盖不会删除旧版本多出来的文件**（287-288 注释），只清本次解压目录；所以「删掉的 dll 残留」可能影响新版本（目前判断为无害）。
-- **`apply()` 之后调用方必须退出**：`main.js:594-596` `apply(job)` 后 900ms `app.quit()`；脚本最多等 90s。
-- **Gitee 100MiB → `.part1/.part2`**（130-134 注释）；`sources.latest` 已把分片合逻辑资产，`check()` 必须把 `parts` 一路带出来（88-101），auto-test:926 专门守这个。
-- **`sizes` 逐地址记录**，不能用 `asset.size` 一处了事（142-147、sources:339-347）。
-- **潜在误判：默认兜底 `/\.zip$/i` 会把运行时整包当更新包**（80）。同一个 release 里既有 `ApkStart-vX-win64-portable.zip` 也有 `ApkStart-runtime-vX.zip`（`.github/workflows/release.yml:44,187`），当前靠 `portable` 正则先命中才没出问题；一旦便携包改名，`/\.zip$/i` 会挑到 1.5GB 的运行时整包并覆盖程序目录。
-- **`prepare` 不校验下载结果的 zip 完整性**，`_extract` 才暴露错误；下载大小与 `total` 不符时 `downloadMulti` 会抛（download:546）。
-- **更新只在打包后检查**：`main.js:1665 if (app.isPackaged)`；开发态不查。
-- 不变量：`apply()` 必须在 `prepare()` 成功之后调用（`prepare` 无载荷时抛错，`main.js:592` 捕获后 `sendProgress({stage:'error'})`）。
-- `flavor` 每次 `readdirSync(installDir)`，无缓存（53-59）——高频调用会有磁盘 IO，目前只在 check/UI 用。
+- **Setup vs portable is decided by "is there an `Uninstall *.exe` in the install directory"** (53-59); there is no other marker. NSIS silently overwrites for setup, and portable copies over.
+- **Overwriting does not delete files that only the old version had** (comment at 287-288); it only clears this run's extraction directory. So "residue of a deleted dll" can affect the new version (currently judged harmless).
+- **The caller must exit after `apply()`**: `main.js:594-596` calls `apply(job)` then `app.quit()` 900ms later; the script waits up to 90s.
+- **Gitee 100MiB → `.part1/.part2`** (comment at 130-134); `sources.latest` already turns parts into a logical asset, and `check()` must carry `parts` all the way out (88-101) — auto-test:926 guards exactly this.
+- **`sizes` is recorded per URL**; you cannot get away with `asset.size` alone (142-147, sources:339-347).
+- **Potential misjudgment: the default fallback `/\.zip$/i` treats the runtime bundle as an update package** (80). The same release contains both `ApkStart-vX-win64-portable.zip` and `ApkStart-runtime-vX.zip` (`.github/workflows/release.yml:44,187`); today it works only because the `portable` regex matches first. If the portable package is ever renamed, `/\.zip$/i` will pick the 1.5GB runtime bundle and overwrite the program directory.
+- **`prepare` does not verify the zip integrity of the download**; only `_extract` surfaces errors, and a size mismatch against `total` is thrown by `downloadMulti` (download:546).
+- **Updates are only checked in a packaged build**: `main.js:1665 if (app.isPackaged)`; development builds never check.
+- Invariant: `apply()` must be called after a successful `prepare()` (`prepare` throws when there is no payload; `main.js:592` catches and sends `sendProgress({stage:'error'})`).
+- `flavor` does a `readdirSync(installDir)` every time with no cache (53-59) — frequent calls mean disk IO; today it is only used by check/UI.
 
-### 被谁调用
-- `src/main.js:38`（require）、`:1503-1511`（构造，注入 `settings`/`onProgress`）、`:579-604`（`runUpdate`：`check`→`prepare`→`apply`→`quit`）、`:496,584,588`（托盘/手动检查 + `repoUrl()`）、`:1447`（`app:updateCheck`，`force` 默认为真）、`:1456`（`app:updateOpen`）、`:1461`（`app:updateApply`）、`:1667`（启动 8s 静默检查）。
-- `src/preload.js:71-72`（`updateCheck` / `updateApply`）；`src/ui/app.js` 设置页「软件更新」。
+### Call sites
+- `src/main.js:38` (require), `:1503-1511` (construct, injecting `settings`/`onProgress`), `:579-604` (`runUpdate`: `check`→`prepare`→`apply`→`quit`), `:496,584,588` (tray/manual check + `repoUrl()`), `:1447` (`app:updateCheck`, `force` defaults to true), `:1456` (`app:updateOpen`), `:1461` (`app:updateApply`), `:1667` (silent check 8s after start).
+- `src/preload.js:71-72` (`updateCheck` / `updateApply`); `src/ui/app.js` settings page, "Software update".
 
-### 测试覆盖（`test/auto-test.js`）
-- ✓ `:820` 版本比较按数字逐段比（`cmpVer`）
-- ✓ `:828` 安装形态决定挑哪个资产 + `flavor` 判定
-- ✓ `:926` 分片资产必须一路传到 `updater.asset`（否则 `prepare` 报「没有可用的下载地址」）
-- ✓ `:1033` 分片更新包按顺序拼回整包，大小不符立刻中止（`_downloadParts`）
-- 间接覆盖：`:843/:864/:878/:901/:949/:976`（`sources`）、`:995/:1068/:1108/:1155/:1198/:1251`（`downloadMulti`）
-- **未覆盖**：`apply()` 生成的脚本内容（无断言抓 `apply.log.ps1`）、`_extract` 的 zip-slip、`prepare` 的 `sizes` 选择。
+### Test coverage (`test/auto-test.js`)
+- yes `:820` version comparison is numeric and segment-by-segment (`cmpVer`)
+- yes `:828` the install flavor decides which asset is picked + `flavor` detection
+- yes `:926` part assets must be carried all the way to `updater.asset` (otherwise `prepare` reports "no usable download address")
+- yes `:1033` part update packages are stitched back in order and aborted immediately on a size mismatch (`_downloadParts`)
+- Indirect coverage: `:843/:864/:878/:901/:949/:976` (`sources`), `:995/:1068/:1108/:1155/:1198/:1251` (`downloadMulti`)
+- **Uncovered**: the contents of the script generated by `apply()` (nothing asserts against `apply.log.ps1`), the zip-slip behavior of `_extract`, and the `sizes` selection in `prepare`.
 
 ---
 
-## 5. `src/core/store.js` — 设置与应用清单持久化
+## 5. `src/core/store.js` — settings and app-list persistence
 
-### 职责
-一个「读时合并默认值 + 原子写」的 JSON 存储：`%APPDATA%\apkstart\{settings.json,apps.json,icons/,apks/}`。
+### Responsibility
+A JSON store that "merges defaults on read + writes atomically": `%APPDATA%\apkstart\{settings.json,apps.json,icons/,apks/}`.
 
-### 对外接口（`module.exports = store`）
+### Public interface (`module.exports = store`)
 
-| 成员 | 签名 | 说明 |
+| Member | Signature | Notes |
 |---|---|---|
-| `DATA_DIR` / `ICON_DIR` / `APK_DIR` | `string` | 10-14；`DATA_DIR = %APPDATA%\apkstart` |
-| `getSettings()` | `() => Settings` | 175-186：`deepMerge(DEFAULT_SETTINGS, 磁盘内容)` + **强制迁移** |
-| `saveSettings(patch)` | `(patch) => Settings` | 188-196：`deepMerge(当前, patch)`，`engine.resourceMode` 存在时翻译成三开关 |
-| `getApps()` | `() => App[]` | 198-201，坏文件回落 `[]` |
+| `DATA_DIR` / `ICON_DIR` / `APK_DIR` | `string` | 10-14; `DATA_DIR = %APPDATA%\apkstart` |
+| `getSettings()` | `() => Settings` | 175-186: `deepMerge(DEFAULT_SETTINGS, disk contents)` + **forced migration** |
+| `saveSettings(patch)` | `(patch) => Settings` | 188-196: `deepMerge(current, patch)`, translating `engine.resourceMode` into the three toggles when present |
+| `getApps()` | `() => App[]` | 198-201, falls back to `[]` on a corrupt file |
 | `saveApps(apps)` | `(apps) => void` | 203-205 |
-| `upsertApp(app)` | `(app) => app` | 207-214，按 `package` 合并 |
+| `upsertApp(app)` | `(app) => app` | 207-214, merges by `package` |
 | `removeApp(pkg)` / `getApp(pkg)` | | 216-223 |
 | `iconPath(pkg)` / `apkPath(pkg,version='cur')` | `=> string` | 225-231 |
 | `ensureDirs()` | `() => void` | 119-123 |
-| `DEFAULT_SETTINGS` | 常量对象 | 16-117，被测试与 doctor 直接引用 |
+| `DEFAULT_SETTINGS` | constant object | 16-117, referenced directly by tests and doctor |
 
-### 关键实现
+### Key internals
 
-- **原子写**（133-138）：写 `<file>.tmp` → `renameSync`，避免半截 JSON。
-- **`deepMerge`（140-150）**：只递归普通对象，数组和标量直接覆盖；`base[k]` 必须是对象才递归。
-- **读时迁移（175-186）——三处强制覆盖，没有版本号字段**：
-  - `s.engine.headless = false`（179）：旧版无头运行 ≠ 打不开窗口；
-  - `s.hideAfterLaunch = false`（181）：旧版退出壳层会杀掉整个运行时；
-  - `s.freeform = false`（184）：旧版 freeform 小窗会变成「窗口里套小窗」。
-  因为每次读都覆盖，旧 settings.json 里的 `true` 永久失效（auto-test:455 断言）。
-- **资源策略翻译（160-170、191-193）**：`save`→`liteMode:true/priorityMode:balanced/renderSize:540x960`；`smooth`→`false/performance/720x1280`；`balanced`→`true/balanced/auto`。只在 `patch.engine.resourceMode` 出现时触发，避免与细项开关打架。
-- **默认值里的「事实约束」**（写在注释里，读的时候别删）：
-  - `engine.headless:false`（28-30）：无头模式 SurfaceFlinger 不出 VSYNC，应用活着但没画面；
-  - `engine.badGpu:''`（32-34）：记录「拉起就崩」的 `<emulator版本>|<gpu>`，升级运行时自动失效；
-  - `runtime.dir:''`（68）= `%APPDATA%\apkstart\runtime`；
-  - `runtime.downloadConnections:8`（88）；
-  - `runtime.sourcePreference:'auto'`（91）、`autoMirror:true`（94）、`giteeToken:''`（97）；
-  - `runtime.compatImage:false`（78）——**已基本废弃**：`provision.checkEnv:381-384` 不再依赖它，把 play 镜像同时当主镜像；
-  - `engine.logLimitKB:2048`（55）、`engine.prefetch` 无、`engine.prewarm:true`（65）；
-  - `display.portrait:'900x1600'`（112），但 `main.js:276` 用的是 `d.portrait || '540x960'`（默认值不一致，实际以 settings 里存在的 900x1600 为准）。
-- **`DEFAULT_SETTINGS` 缺 `runtime.avdDir`**：`provision.paths():207` 读 `runtime.avdDir`，新装用户这里是 `undefined`；UI 写入后才有（`ui/app.js:1203`）。同理 `runtime.installed` 被 `engine.js:870` 读，但默认值里没有。
+- **Atomic write** (133-138): write `<file>.tmp` → `renameSync`, avoiding half-written JSON.
+- **`deepMerge` (140-150)**: recurses only into plain objects; arrays and scalars are overridden; recursion happens only when `base[k]` is an object.
+- **Read-time migration (175-186) — three forced overrides, with no version field**:
+  - `s.engine.headless = false` (179): the old headless mode is not the same as "the window will not open";
+  - `s.hideAfterLaunch = false` (181): in old builds quitting the shell killed the whole runtime;
+  - `s.freeform = false` (184): the old freeform small window turned into "a small window inside a window".
+  Because it overrides on every read, a `true` in an old settings.json is permanently ineffective (asserted at auto-test:455).
+- **Resource-policy translation (160-170, 191-193)**: `save` → `liteMode:true/priorityMode:balanced/renderSize:540x960`; `smooth` → `false/performance/720x1280`; `balanced` → `true/balanced/auto`. It fires only when `patch.engine.resourceMode` is present, to avoid fighting with the individual toggles.
+- **"Factual constraints" documented in the defaults** (written in comments; do not delete them when reading):
+  - `engine.headless:false` (28-30): in headless mode SurfaceFlinger emits no VSYNC, so apps are alive but show nothing;
+  - `engine.badGpu:''` (32-34): records the `<emulator version>|<gpu>` that "crashed right after launch", invalidated automatically when the runtime is upgraded;
+  - `runtime.dir:''` (68) = `%APPDATA%\apkstart\runtime`;
+  - `runtime.downloadConnections:8` (88);
+  - `runtime.sourcePreference:'auto'` (91), `autoMirror:true` (94), `giteeToken:''` (97);
+  - `runtime.compatImage:false` (78) — **essentially obsolete**: `provision.checkEnv:381-384` no longer depends on it and uses the play image as the primary image too;
+  - `engine.logLimitKB:2048` (55), no `engine.prefetch`, `engine.prewarm:true` (65);
+  - `display.portrait:'900x1600'` (112), but `main.js:276` uses `d.portrait || '540x960'` (inconsistent defaults; in practice the 900x1600 that exists in settings wins).
+- **`DEFAULT_SETTINGS` lacks `runtime.avdDir`**: `provision.paths():207` reads `runtime.avdDir`, which is `undefined` for a fresh user; it only exists after the UI writes it (`ui/app.js:1203`). Likewise `runtime.installed` is read by `engine.js:870` but absent from the defaults.
 
-### 坑点与不变量
+### Pitfalls and invariants
 
-- **`getSettings()` 每次调用都 `readFileSync + JSON.parse`，没有内存缓存**（175-186）。而 `provision.paths()` 每次调用要读 2~4 次 settings（193、207、209 等），`checkEnv()` 在多处被状态轮询调用 → 高频小文件读。要做性能优化这里是第一个下手点。
-- **`saveSettings` 写的是「合并后的完整对象」**（189-194），所以 settings.json 会带上当时的所有默认值；升级后新增的默认值不会被写入，只在读时合并——这正是迁移可以放在读时的原因。
-- 迁移是**单向强制**（179-184），未来若要允许用户重新打开 headless，必须改这里而不是改 UI。
-- `writeJson` 的 `renameSync` 在跨卷时会失败（`os.tmpdir` 与 `DATA_DIR` 同卷时没事；测试里改 `APPDATA` 后仍在同卷）。
-- 测试隔离方式：改 `process.env.APPDATA` 再**重新 require**（`auto-test.js:11,1344-1347`）；`DATA_DIR` 是模块加载时求值的常量，同进程内改 env 不会生效——写测试时注意。
+- **`getSettings()` does `readFileSync + JSON.parse` on every call with no in-memory cache** (175-186). Meanwhile `provision.paths()` reads settings 2–4 times per call (193, 207, 209 etc.), and `checkEnv()` is called from several status polls → lots of small-file reads. This is the first place to optimize for performance.
+- **`saveSettings` writes the "merged full object"** (189-194), so settings.json carries every default value as of that moment; defaults added by an upgrade are not written and only merged on read — which is exactly why the migration can live on the read path.
+- The migration is a **one-way force** (179-184); if users should ever be allowed to re-enable headless, change this, not the UI.
+- `writeJson`'s `renameSync` would fail across volumes (`os.tmpdir` and `DATA_DIR` are on the same volume here; tests that change `APPDATA` are still on the same volume).
+- How tests isolate state: change `process.env.APPDATA` then **re-`require`** (`auto-test.js:11,1344-1347`); `DATA_DIR` is a constant evaluated at module load, so changing the env within the same process has no effect — keep that in mind when writing tests.
 
-### 被谁调用
-- `src/core/provision.js:12,145,192,197-237,452,1159,1187,1193,1217`。
-- `src/core/engine.js:15,1017-1021`（`store.DATA_DIR`）、`src/core/emulator.js:16`、`src/core/installer.js:10`、`src/core/sharer.js:10`、`src/core/layers.js:162`（`summary` 内延迟 require）。
-- `src/main.js`：全流程（启动迁移、`app:info`、`settings:get/set`、`bootstrabBundledRuntime:97-171` 直接 `saveSettings({runtime:{dir}})`）。
-- `test/engine-test.js:147`、`test/auto-test.js:456,700,1346,1374,1386`、`test/boot-test.js:21`。
+### Call sites
+- `src/core/provision.js:12,145,192,197-237,452,1159,1187,1193,1217`.
+- `src/core/engine.js:15,1017-1021` (`store.DATA_DIR`), `src/core/emulator.js:16`, `src/core/installer.js:10`, `src/core/sharer.js:10`, `src/core/layers.js:162` (lazy require inside `summary`).
+- `src/main.js`: the whole flow (startup migration, `app:info`, `settings:get/set`, `bootstrabBundledRuntime:97-171` calling `saveSettings({runtime:{dir}})` directly).
+- `test/engine-test.js:147`, `test/auto-test.js:456,700,1346,1374,1386`, `test/boot-test.js:21`.
 
-### 测试覆盖
-- ✓ `auto-test.js:455` 旧配置强制迁移：无头与「启动后退出」不再生效
-- ✓ `auto-test.js:1373` 资源策略一处切换，自动翻译成 vCPU/优先级/分辨率
-- ✓ `auto-test.js:1385` 数据分区容量可配置，默认不再是死数字
-- ✓ `engine-test.js:149` 默认运行时目录位于数据目录下（依赖 `DATA_DIR`）
-- **未覆盖**：`upsertApp/removeApp/apkPath/iconPath`、`writeJson` 原子性。
+### Test coverage
+- yes `auto-test.js:455` forced migration of old config: headless and "quit after launch" no longer take effect
+- yes `auto-test.js:1373` one resource-policy switch is translated automatically into vCPU/priority/resolution
+- yes `auto-test.js:1385` the data-partition capacity is configurable and no longer a hardcoded number by default
+- yes `engine-test.js:149` the default runtime directory is inside the data directory (depends on `DATA_DIR`)
+- **Uncovered**: `upsertApp/removeApp/apkPath/iconPath`, and the atomicity of `writeJson`.
 
 ---
 
-## 6. `src/core/layers.js` — 容器分层盘点 / 回收
+## 6. `src/core/layers.js` — container layer inventory / reclaim
 
-### 职责
-把运行时目录当成镜像层来做**只读盘点**与**按明确清单回收**（默认 `dryRun`），并给设置页一个「一共占了多少盘」的摘要。
+### Responsibility
+Treats the runtime directory as image layers for a **read-only inventory** and **reclaim against an explicit list** (default `dryRun`), and gives the settings page a summary of "how much disk it all takes".
 
-### 对外接口（导出 `{analyze, prune, summary, walk, dirSize}`）
+### Public interface (exports `{analyze, prune, summary, walk, dirSize}`)
 
-| 导出 | 签名 | 说明 |
+| Export | Signature | Notes |
 |---|---|---|
-| `walk` | `(dir, out=[], depth=0) => [{path,size}]` | 递归文件列表，**深度上限 6**（15-27） |
+| `walk` | `(dir, out=[], depth=0) => [{path,size}]` | Recursive file list, **depth capped at 6** (15-27) |
 | `dirSize` | `(dir) => bytes` | 29 |
 | `analyze` | `(root, {keepAvd='apkstart.avd', aggressive=false, keepSnapshots=false}) => {total,groups,candidates}` | 36-127 |
 | `prune` | `(root, {apply=false, keepAvd, aggressive, keepSnapshots, onRemove}) => {…analyze, apply, removed, saved, after}` | 133-152 |
 | `summary` | `(root) => {total,totalText,runtimeText,groups,reclaimable,reclaimableText,count}` | 155-184 |
 
-`candidates[]` 项：`{path, size, reason, kind:'file'|'dir'}`。
+Each `candidates[]` item is `{path, size, reason, kind:'file'|'dir'}`.
 
-### 关键实现
+### Key internals
 
-**1) `analyze()` 的 8 类回收项（对应代码顺序）**
+**1) The 8 reclaim categories in `analyze()` (in code order)**
 
-| # | 行号 | 目标 | reason |
+| # | Lines | Target | reason |
 |---|---|---|---|
-| 0 | 48-51 | `emulator/`、`system-images/`、`avd/`、`platform-tools/` | 只做 size 分组（`groups`），不删 |
-| 1 | 53-61 | `emulator/qemu/windows-x86_64/qemu-system-{aarch64,armel,i386}*` | 非 x86_64 的 QEMU 目标 |
-| 2 | 63-68 | `system-images/**/{NOTICE.txt,source.properties}` 且 >1MB | 镜像包内大体积说明文件 |
-| 3 | 70-77 | `system-images/android-30`（仅当 API34 play 的 `system.img` 存在）、`<root>/x86_64` | 旧镜像 / 解压错位目录 |
-| 4 | 79-86 | `avd/*.avd` 中 `name !== keepAvd` | 非活动 AVD（含 8-16GB 用户数据） |
-| 5 | 87-90 | `avd/**/*.lock` | 上次异常退出残留锁文件 |
-| 6 | 91-100 | `avd/<keepAvd>/snapshots` 或 `snapshots.stale-N`（`keepSnapshots=false` 时） | 旧 quickboot 快照 |
-| 7 | 103-110 | `<root>/_tmp`、`<root>/images` | 下载临时文件 / 旧 QEMU·ISO 遗留 |
-| 8 | 112-123 | `aggressive` 时 `emulator/crashreport.exe` | 构建发行包专用 |
+| 0 | 48-51 | `emulator/`, `system-images/`, `avd/`, `platform-tools/` | Size groups only (`groups`), never deleted |
+| 1 | 53-61 | `emulator/qemu/windows-x86_64/qemu-system-{aarch64,armel,i386}*` | Non-x86_64 QEMU targets |
+| 2 | 63-68 | `system-images/**/{NOTICE.txt,source.properties}` larger than 1MB | Bulky readme files inside image packages |
+| 3 | 70-77 | `system-images/android-30` (only when API34 play's `system.img` exists), `<root>/x86_64` | Old image / mis-placed extraction directory |
+| 4 | 79-86 | `avd/*.avd` where `name !== keepAvd` | Inactive AVDs (8–16GB of user data included) |
+| 5 | 87-90 | `avd/**/*.lock` | Lock files left by an abnormal exit |
+| 6 | 91-100 | `avd/<keepAvd>/snapshots` or `snapshots.stale-N` (when `keepSnapshots=false`) | Old quickboot snapshots |
+| 7 | 103-110 | `<root>/_tmp`, `<root>/images` | Download temp files / old QEMU·ISO leftovers |
+| 8 | 112-123 | `emulator/crashreport.exe` when `aggressive` | Only used to build release packages |
 
-**2) `prune()` 的安全约束（139-141）**
+**2) `prune()`'s safety constraint (139-141)**
 ```js
 const p = path.resolve(c.path), rootAbs = path.resolve(root);
-if (p === rootAbs || !p.startsWith(rootAbs + path.sep)) continue;   // 不出 root、不删 root
+if (p === rootAbs || !p.startsWith(rootAbs + path.sep)) continue;   // never leave root, never delete root
 ```
-`apply=false` 时**一个文件都不动**（142-149），只返回清单；删除失败（被占用）静默跳过，下次再清（148）。
+With `apply=false` it **touches no file** (142-149) and only returns the list; a failed delete (file in use) is skipped silently and cleaned next time (148).
 
-**3) `summary()`（155-184）**：运行时 `analyze` + 4 个额外目录（`avd`、`APK_DIR`、`ICON_DIR`、`logs`），过滤 0 字节组，单位在 1GB 以上转 GB。
+**3) `summary()` (155-184)**: runs `analyze` on the runtime plus 4 extra directories (`avd`, `APK_DIR`, `ICON_DIR`, `logs`), filters out zero-byte groups, and switches to GB above 1GB.
 
-### 坑点与不变量
+### Pitfalls and invariants
 
-- **`aggressive` 的黑名单是硬约束**（112-114 注释）：`Qt6WebEngineCoreAndroidEmu.dll` 是 `qemu-system-x86_64.exe` 的加载时依赖，**绝不能删**；`qsn/netsim` 保守保留。
-- **`keepAvd` 默认写死 `'apkstart.avd'`**，与 `emulator.js` 的 `AVD_NAME` 必须一致；改名要同步两处。
-- **运行时正在跑时必须 `keepSnapshots:true`**：`engine.cleanup()` 传 `keepSnapshots: this.vmRunning`（`engine.js:1019-1023`），否则删当前会话的快照会把运行中的机器写坏。
-- `walk` 的深度 6 是为了防符号链接环/深层目录炸栈；超过 6 层的文件不计入 size（会低估）。
-- `analyze` 的 `candidates` **不包含**「活动 AVD 的 userdata/快照（`keepSnapshots=true` 时）」，这是「已装应用不会被清」的保证（auto-test:174 断言）。
-- `prune` 的 `after` 只是 `total - saved`，不重新扫描，真删失败时与实际略有出入。
+- **The `aggressive` blacklist is a hard constraint** (comment at 112-114): `Qt6WebEngineCoreAndroidEmu.dll` is a load-time dependency of `qemu-system-x86_64.exe` and **must never be deleted**; `qsn/netsim` are kept conservatively.
+- **`keepAvd` defaults to the hardcoded `'apkstart.avd'`** and must match `AVD_NAME` in `emulator.js`; rename both together.
+- **`keepSnapshots:true` is required while the runtime is running**: `engine.cleanup()` passes `keepSnapshots: this.vmRunning` (`engine.js:1019-1023`), otherwise deleting the current session's snapshots would corrupt the running machine.
+- `walk`'s depth limit of 6 prevents symlink loops/deep recursion blowups; files deeper than 6 levels are not counted in size (an underestimate).
+- `analyze`'s `candidates` **do not include** "the active AVD's userdata/snapshots (when `keepSnapshots=true`)" — that is the guarantee that installed apps are never removed (asserted at auto-test:174).
+- `prune`'s `after` is just `total - saved` with no rescan, so it differs slightly from reality when a delete failed.
 
-### 被谁调用
-- `src/core/engine.js:1017`（`usage()` → `summary`）、`:1019-1023`（`cleanup()` → `prune`）。
-- `src/main.js:1004`（`runtime:usage` → `runtime.usage()` → `summary`）、`:1056-1071`（`runtime:cleanup`：先 `apply:false` 拿清单 → `dialog.showMessageBox` 二次确认 → `apply:true`）。
-- `src/ui/app.js`（设置页「占用/清理」面板，经 `runtime:usage`/`runtime:cleanup`）。
-- `test/auto-test.js:25,157,167,171`。
+### Call sites
+- `src/core/engine.js:1017` (`usage()` → `summary`), `:1019-1023` (`cleanup()` → `prune`).
+- `src/main.js:1004` (`runtime:usage` → `runtime.usage()` → `summary`), `:1056-1071` (`runtime:cleanup`: first `apply:false` to get the list → `dialog.showMessageBox` confirmation → `apply:true`).
+- `src/ui/app.js` (the settings page "usage/cleanup" panel, through `runtime:usage`/`runtime:cleanup`).
+- `test/auto-test.js:25,157,167,171`.
 
-### 测试覆盖
-- ✓ `auto-test.js:139` 盘点可回收项：非 x86_64 QEMU、旧镜像、旧 AVD、锁文件、旧快照（含 dryRun 不删除、`apply` 后活动 AVD 与 x86_64 QEMU 保留）
-- **未覆盖**：`summary()` 的额外 4 个目录、`aggressive` 分支、深度上限。
+### Test coverage
+- yes `auto-test.js:139` inventory of reclaimable items: non-x86_64 QEMU, old images, old AVDs, lock files, old snapshots (including "dryRun deletes nothing" and "the active AVD and x86_64 QEMU survive `apply`")
+- **Uncovered**: the 4 extra directories in `summary()`, the `aggressive` branch, and the depth limit.
 
 ---
 
-## 7. 小工具四件套
+## 7. The four small utilities
 
-### 7.1 `src/core/logfile.js` — 按大小滚动日志
+### 7.1 `src/core/logfile.js` — size-rotated logging
 
-| 导出 | 签名 | 说明 |
+| Export | Signature | Notes |
 |---|---|---|
-| `rotate` | `(file, limitKB) => bool` | 15-26：`size < limit` 返回 false；否则删旧 `.1.log` → `rename` 成 `.1.log` |
-| `append` | `(file, line, limitKB=2048) => bool` | 33-45：**每进程首次 + 每 200 行**做一次 rotate（39），`appendFileSync` 补换行 |
-| `trimNow` | `(file, limitKB=2048) => bool` | 48-50：启动时无条件检查一次 |
+| `rotate` | `(file, limitKB) => bool` | 15-26: returns false when `size < limit`; otherwise deletes the old `.1.log` → renames to `.1.log` |
+| `append` | `(file, line, limitKB=2048) => bool` | 33-45: rotates on **the first call in each process + every 200 lines** (39), and `appendFileSync` adds the newline |
+| `trimNow` | `(file, limitKB=2048) => bool` | 48-50: an unconditional check at startup |
 
-- 职责：`app.log` / `emulator.log` 长期 append 会被写满（header 2-9），只保留**一份** `.1.log`。
-- 坑点：`limitKB` 被 `Math.max(256, ...)` 夹到 ≥256KB（39、49）；`counters` 是模块级 `Map`，进程重启归零；`rotate` 用 `renameSync`，Windows 上文件被占用会失败并返回 false（静默）。
-- 被谁调用：`src/main.js:85`（`appLog`，`logs/app.log`）、`src/core/emulator.js:577`（emulator 日志）。
-- 测试：✓ `auto-test.js:1404` 日志超过上限自动滚动，只保留一份备份。
+- Responsibility: long-term appends to `app.log` / `emulator.log` would fill the disk (header at 2-9); only **one** `.1.log` is kept.
+- Pitfalls: `limitKB` is clamped to ≥256KB by `Math.max(256, ...)` (39, 49); `counters` is a module-level `Map` that resets when the process restarts; `rotate` uses `renameSync`, which on Windows fails silently (returns false) when the file is in use.
+- Call sites: `src/main.js:85` (`appLog`, `logs/app.log`), `src/core/emulator.js:577` (emulator log).
+- Tests: yes `auto-test.js:1404` — the log rotates automatically once over the limit and only one backup is kept.
 
-### 7.2 `src/core/notify.js` — 安卓通知 → Windows 通知
+### 7.2 `src/core/notify.js` — Android notifications → Windows notifications
 
-| 导出 | 签名 | 说明 |
+| Export | Signature | Notes |
 |---|---|---|
-| `parseRecords` | `(dumpsys 文本) => [{pkg,key,title,text}]` | 34-63 |
-| `NotifyBridge` | `new NotifyBridge({getClient,getAppLabel,getAppIcon,onOpen})` | `start()/stop()`，内部 `setInterval(_tick, POLL_MS=2500)`（11、77-89） |
+| `parseRecords` | `(dumpsys text) => [{pkg,key,title,text}]` | 34-63 |
+| `NotifyBridge` | `new NotifyBridge({getClient,getAppLabel,getAppIcon,onOpen})` | `start()/stop()`, internally `setInterval(_tick, POLL_MS=2500)` (11, 77-89) |
 
-关键实现：
-- 每 2.5s `client.shell('dumpsys notification --noredact', {timeout:12000})`（97），**先 `isOnline()`**（96）；
-- 过滤：`SYSTEM_PKGS` 白名单 + `com.android.providers.*` + `launcher`（18-32）；`FLAG_ONGOING_EVENT(0x2)`、`FLAG_FOREGROUND_SERVICE(0x40)` 跳过（43-45）；
-- 首次 `_tick` 只做基线 `primed`，避免启动瞬间把历史通知全弹一遍（99-104）；`seen` 超 500 条裁到 300（113）；
-- 点击 `note.on('click')` → `onOpen(pkg)`（130）；
-- 模块顶层 `require('electron')`（9）→ **纯 Node 测试跑不了**，所以 `test/notify-test.js` 用 electron 跑。
+Key internals:
+- Every 2.5s `client.shell('dumpsys notification --noredact', {timeout:12000})` (97), **after `isOnline()`** (96);
+- Filtering: the `SYSTEM_PKGS` allowlist + `com.android.providers.*` + `launcher` (18-32); `FLAG_ONGOING_EVENT(0x2)` and `FLAG_FOREGROUND_SERVICE(0x40)` are skipped (43-45);
+- The first `_tick` only establishes a `primed` baseline, so startup does not pop every historical notification at once (99-104); `seen` is trimmed from over 500 to 300 (113);
+- Clicking `note.on('click')` → `onOpen(pkg)` (130);
+- A top-level `require('electron')` (9) → **plain-Node tests cannot run it**, which is why `test/notify-test.js` runs under Electron.
 
-被谁调用：`src/main.js:36,682-697`（`startNotifier()`，只在容器有应用窗口时由 `onContainerActive(true)` 启动，`:670-678` 关闭时 `stop()`；`:1772` 退出时 stop）。
-测试：`test/notify-test.js`（用真实 `test/notif.txt` dump 调 `parseRecords`，**不在 `npm test` 里**）；`NotifyBridge` 本体无覆盖。
+Call sites: `src/main.js:36,682-697` (`startNotifier()`, started only by `onContainerActive(true)` when the container has an app window, and `stop()`ed at `:670-678` when it closes; stopped at `:1772` on exit).
+Tests: `test/notify-test.js` (calls `parseRecords` with a real `test/notif.txt` dump; **not part of `npm test`**); `NotifyBridge` itself is uncovered.
 
-### 7.3 `src/core/android.js` — 安卓设置开关（不需要进桌面）
+### 7.3 `src/core/android.js` — Android settings toggles (no need to enter the launcher)
 
-| 导出 | 说明 |
+| Export | Notes |
 |---|---|
-| `ACTIONS` | 11 个 `android.settings.*` action 常量（7-19） |
-| `AndroidSettings` | `new AndroidSettings(runtime)`；方法 `status()`、`setWifi`、`setAirplane`、`setVolume`、`setAnimations`、`setFontScale`、`setDensity`、`tune({pkg})`、`open(action)`、`permissions(pkg)`、`grantAll(pkg)` |
+| `ACTIONS` | 11 `android.settings.*` action constants (7-19) |
+| `AndroidSettings` | `new AndroidSettings(runtime)`; methods `status()`, `setWifi`, `setAirplane`, `setVolume`, `setAnimations`, `setFontScale`, `setDensity`, `tune({pkg})`, `open(action)`, `permissions(pkg)`, `grantAll(pkg)` |
 
-关键实现：
-- `client()` 每次 `await runtime.ensure()`（24-28），失败抛「运行时未就绪」；
-- `_sh(commands)` 把多条命令用 `; ` 拼成**一次** `adb shell`（30-34），20s 超时；
-- `status()` 用 `echo "k=$(...)"` 一次拿 7 个值再正则解析（37-61）；
-- `tune()`：关三个动画 + `max_cached_processes=32` + 可选 `deviceidle whitelist +pkg`（111-121）；
-- `permissions()` 解析 `dumpsys package` 的 `runtime permissions:` 段，按缩进收尾（131-145）；`grantAll()` 逐个 `pm grant`，失败忽略（147-156）；
-- 取值范围：`fontScale 0.85~1.3`、`density 120~640`、`volume 0~100`（79-108）。
+Key internals:
+- `client()` does `await runtime.ensure()` every time (24-28) and throws "runtime not ready" on failure;
+- `_sh(commands)` joins several commands with `; ` into **one** `adb shell` (30-34) with a 20s timeout;
+- `status()` uses `echo "k=$(...)"` to grab 7 values at once and then parses them with regex (37-61);
+- `tune()`: turns off the three animation scales + `max_cached_processes=32` + optionally `deviceidle whitelist +pkg` (111-121);
+- `permissions()` parses the `runtime permissions:` section of `dumpsys package`, ending by indentation (131-145); `grantAll()` runs `pm grant` for each and ignores failures (147-156);
+- Value ranges: `fontScale 0.85~1.3`, `density 120~640`, `volume 0~100` (79-108).
 
-被谁调用：`src/main.js:1501`（`androidSet = new AndroidSettings(runtime)`）、`:1404-1434`（`android:status/set/open/tune/permissions/grantAll` IPC）；`src/preload.js` 暴露给设置页。
-测试：**✗ 无覆盖**（需要真实 adb）。
+Call sites: `src/main.js:1501` (`androidSet = new AndroidSettings(runtime)`), `:1404-1434` (the `android:status/set/open/tune/permissions/grantAll` IPC); `src/preload.js` exposes it to the settings page.
+Tests: **no coverage** (it needs a real adb).
 
-### 7.4 `src/core/display.js` — 显示适配的纯计算
+### 7.4 `src/core/display.js` — pure display-fit math
 
-| 导出 | 签名 | 说明 |
+| Export | Signature | Notes |
 |---|---|---|
-| `densityFor` | `(w,h,manual) => dpi` | `manual>0` 时夹 120~640；否则 `min(w,h)/2.57` 夹 200~480（7-10） |
-| `portraitSize` | `(str) => {w,h}` | 解析 `900x1600`，非法/横屏回 `{900,1600}`（12-18） |
-| `defaultBounds` | `(area) => {x,y,w,h}` | 高度 `area.h*0.84`，宽 9:16，居中（20-28） |
-| `fullscreenBounds` | `(portrait, area) => {x,y,w,h}` | 铺满高度、按竖屏比例算宽、水平居中（36-46） |
-| `sizeFor` | `(mode, portrait, area) => {w,h}` | **两种模式都返回竖屏预设**（55-57） |
+| `densityFor` | `(w,h,manual) => dpi` | Clamped to 120–640 when `manual>0`; otherwise `min(w,h)/2.57` clamped to 200–480 (7-10) |
+| `portraitSize` | `(str) => {w,h}` | Parses `900x1600`; illegal/landscape falls back to `{900,1600}` (12-18) |
+| `defaultBounds` | `(area) => {x,y,w,h}` | Height `area.h*0.84`, 9:16 width, centered (20-28) |
+| `fullscreenBounds` | `(portrait, area) => {x,y,w,h}` | Full height, width from the portrait ratio, horizontally centered (36-46) |
+| `sizeFor` | `(mode, portrait, area) => {w,h}` | **Both modes return the portrait preset** (55-57) |
 
-关键不变量（写在注释里）：模拟器窗口的宽高比**在开机时被 LCD 锁死**，直接 `SW_MAXIMIZE` 只会得到贴左边、宽度不变的窗口；所以「全屏」= 最大化窗口而**不改 Android 分辨率**（48-54），切换模式不需要重启运行时。
+Key invariant (documented in the comments): the emulator window's aspect ratio is **locked by the LCD at boot**, and a plain `SW_MAXIMIZE` only yields a window stuck to the left edge with an unchanged width; so "fullscreen" = maximize the window **without changing the Android resolution** (48-54), and switching modes needs no runtime restart.
 
-被谁调用：`src/main.js:32`（require）、`:274-277`（`portraitSize()` 读 `display.portrait`）——**只有 `portraitSize` 在运行时代码里被用**；`densityFor/defaultBounds/fullscreenBounds/sizeFor` 目前只被测试调用（`appwin.js:46` 有自己的一份 `AppWindow.sizeFor`）。
-测试：✓ `auto-test.js:465` 显示适配：窗口/全屏共用竖屏分辨率，窗口比例 9:16 可拉伸（覆盖 4 个函数）。
+Call sites: `src/main.js:32` (require), `:274-277` (`portraitSize()` reads `display.portrait`) — **only `portraitSize` is used in runtime code**; `densityFor/defaultBounds/fullscreenBounds/sizeFor` are currently called only by tests (`appwin.js:46` has its own `AppWindow.sizeFor`).
+Tests: yes `auto-test.js:465` "display fit: window/fullscreen share the portrait resolution, the window keeps a stretchable 9:16 ratio" (covers all 4 functions).
 
 ---
 
-## 8. 下载 / 部署 / 更新总链路
+## 8. The overall download / deploy / update chain
 
-### 8.1 文字流程图
+### 8.1 Text flowchart
 
 ```
-【用户点「一键完成」】
+[User clicks "one-click setup"]
 src/ui/app.js:371  deployAll()
-   ├─ setStepBusy('all',true)  → 按钮文案「准备中…」(app.js:334)
+   ├─ setStepBusy('all',true)  → button says "preparing…" (app.js:334)
    ├─ api.autoDeploy()         → preload.js:45  invoke('runtime:autoDeploy')
    └─ IPC runtime:autoDeploy   → main.js:870
-        └─ autoDeploy()        → main.js:314  （有 deploying 互斥锁，main.js:313/315）
+        └─ autoDeploy()        → main.js:314  (has a `deploying` mutex, main.js:313/315)
 
-【autoDeploy 主流程 main.js:314-354】
+[autoDeploy main flow, main.js:314-354]
  1. env = provisioner.checkEnv()                           main.js:319
  2. needEngine = !env.emulator.ok || !env.sysimg.ok        main.js:320
  3. if needEngine && settings.runtime.preferGithubRuntime:
       installRuntimePack(progress)                          provision.js:522
         ├─ resolveRuntimePack()                             provision.js:476
-        │    ├─ runtimePackUrl 自定义？直接用                :477
-        │    ├─ 并发 GET GitHub / Gitee releases?per_page=15  :487
-        │    └─ 找 assets /^ApkStart-runtime-.*\.zip$/，cmpVer 取最高  :497-515
+        │    ├─ custom runtimePackUrl? use it directly      :477
+        │    ├─ concurrent GET GitHub / Gitee releases?per_page=15  :487
+        │    └─ find assets /^ApkStart-runtime-.*\.zip$/, highest by cmpVer  :497-515
         ├─ guardDisk('runtime', root)   [512+1024=1536MB]    :525 → :262
-        ├─ sources.rank(sources.candidates(url))  串行测速   :534-536 → sources.js:399
+        ├─ sources.rank(sources.candidates(url))  serial speed test  :534-536 → sources.js:399
         ├─ downloadMulti(urls, _tmp/runtime-pack.zip)        :541 → download.js:338
-        │    ├─ 并发 Range 探测 → 只混用「总大小一致」的源   download.js:355-381
-        │    ├─ 分块 8 线程轮转分配 + .chunks.json 边车     download.js:391-416
-        │    └─ 空闲看门狗 20s / 低速 45s&<120KB/s 换源      download.js:449-503
-        ├─ 体积闸门 <200MB → 抛「整包下载不完整」            :556
-        ├─ extractZip(zip, root)   >64MB 用 ZipFile 流式     :559 → :591
-        ├─ 写 <root>/.runtime-pack.json，删 zip              :566-571
+        │    ├─ concurrent Range probe → only mix sources with the same total size  download.js:355-381
+        │    ├─ 8-way chunk rotation + .chunks.json sidecar  download.js:391-416
+        │    └─ idle watchdog 20s / slow 45s & <120KB/s → switch source  download.js:449-503
+        ├─ size gate <200MB → throw "bundle download incomplete"  :556
+        ├─ extractZip(zip, root)   >64MB uses streaming ZipFile  :559 → :591
+        ├─ write <root>/.runtime-pack.json, delete the zip   :566-571
         └─ materializeImages()  .img.xz/.gz → .img           :573-576 → :722
       afterPack = checkEnv()                                 main.js:328
       if emulator.ok && sysimg.ok → return {ok:true,source:'github'}
-      else → 继续走官方源补齐（main.js:330）
- 4. 官方源逐组件兜底（仅当上一步失败/不完整）：
+      else → continue filling gaps from the official source (main.js:330)
+ 4. Official-source per-component fallback (only if the previous step failed/incomplete):
       installAdb()          provision.js:428  → downloadAny  platform-tools.zip
       installEmulator()     provision.js:905  → downloadAnyParallel + extractZip + ensurePlatformTools
       installSystemImage()  provision.js:966  → installPlayImage(:1004) → downloadAnyParallel + extractZip
- 5. after = checkEnv()；ok = adb.ok && emulator.ok && sysimg.ok   main.js:347-348
+ 5. after = checkEnv(); ok = adb.ok && emulator.ok && sysimg.ok   main.js:347-348
  6. finally deploying=false                                 main.js:351-353
 
-【UI 接着开机 app.js:381-387】
- api.runtimeStart() → main.js:880 → runtime.ensure()        engine.js:787 起
+[The UI then boots, app.js:381-387]
+ api.runtimeStart() → main.js:880 → runtime.ensure()        engine.js:787 onwards
    ├─ provisioner.materializeImages(onLog).catch(()=>{})     engine.js:848
    ├─ checkEnv()                                             engine.js:849
    ├─ killOrphanEmulators()                                  engine.js:856
-   └─ boot()  失败则 doctor 诊断 + 变体重试（GPU/accel/内存逐级降）
+   └─ boot()  on failure doctor diagnosis + variant retries (GPU/accel/memory stepped down)
 
-【启动后的两条后台链】
- A. 自动部署（延迟 20s）main.js:1657-1661 → autoDeploy()   ← 与 UI 同一个函数
- B. 更新检查（打包后延迟 8s）main.js:1665-1676
+[Two background chains after startup]
+ A. Auto-deploy (20s delay) main.js:1657-1661 → autoDeploy()   ← the same function as the UI
+ B. Update check (8s after start, packaged only) main.js:1665-1676
       updater.check()                     updater.js:73
         └─ sources.latest({force})        sources.js:277
-             ├─ fetchReleases() 并发 GitHub/Gitee            :237
-             ├─ 403/429 → 熔断 15min                          :286-290
-             ├─ 全部失败 → 上一次结果 + stale                  :292-298
-             └─ 同版本资产合并（urls[] + sizes{}）、parts 保留  :304-348
+             ├─ fetchReleases() concurrently GitHub/Gitee   :237
+             ├─ 403/429 → breaker 15min                     :286-290
+             ├─ all failed → previous result + stale        :292-298
+             └─ merge same-version assets (urls[] + sizes{}), keep parts  :304-348
       info.hasUpdate → notify + send('update:state')
 
-【用户点「立即更新」】
- main.js:579 runUpdate()  （updateBusy 互斥）
+[User clicks "update now"]
+ main.js:579 runUpdate()  (updateBusy mutex)
    ├─ updater.prepare(info)                              updater.js:121
-   │    ├─ parts?  _downloadParts()  每片单独测速+下载+顺序拼  :182
-   │    └─ 否则    candidates→rank→downloadMulti          :140-163
-   │    └─ .zip → _extract 到 update/<ver>/payload         :166-173
-   ├─ updater.apply(job)                                  updater.js:258
-   │    ├─ 生成 PS 脚本（Wait-Process 90s → 复制/静默安装 → 重启 → 清理 → exit 0）
-   │    ├─ 落盘 update/apply.log.ps1（排障）               :310
-   │    └─ spawn powershell -EncodedCommand（**非 detached**）+ unref  :319-323
-   └─ setTimeout(900ms) → quitting=true; app.quit()        main.js:596
-        └─ 脚本等进程退出 → 覆盖安装目录 → Start-Process exe → 删 update/<ver>
+   │    ├─ parts?  _downloadParts()  per-part speed test + download + sequential stitch  :182
+   │    └─ otherwise  candidates→rank→downloadMulti      :140-163
+   │    └─ .zip → _extract to update/<ver>/payload       :166-173
+   ├─ updater.apply(job)                                 updater.js:258
+   │    ├─ generate the PS script (Wait-Process 90s → copy/silent install → restart → cleanup → exit 0)
+   │    ├─ write update/apply.log.ps1 (troubleshooting)  :310
+   │    └─ spawn powershell -EncodedCommand (**not detached**) + unref  :319-323
+   └─ setTimeout(900ms) → quitting=true; app.quit()       main.js:596
+        └─ the script waits for the process to exit → overwrites the install dir → Start-Process exe → deletes update/<ver>
 ```
 
-关键时序数字（都是一次性常量，接手时不要随便调小）：
-- `autoDeploy` 延迟 **20s**（`main.js:1661`，注释：冷启动磁盘/CPU 已打满）；
-- 更新检查延迟 **8s** 且仅 `app.isPackaged`（`main.js:1665-1675`）；
-- `apply` 里 `Wait-Process -Timeout 90`、复制 **12 轮 ×600ms**、重启后 400ms 清理（`updater.js:271-306`）；
-- `apply` 返回后 **900ms** 退出应用（`main.js:596`）；
-- `downloadMulti`：块空闲 **20s**、低速阈值 **45s + 120KB/s**、每块重试 **6** 次、换源上限 **2** 次；
-- `download`（单流）：空闲 **30s**、非 2xx 重试 **2** 次 ×1.5s。
+Key timing numbers (one-off constants; do not casually lower them when taking over):
+- `autoDeploy` delay **20s** (`main.js:1661`; the comment notes disk/CPU are already saturated during a cold start);
+- Update check delay **8s**, only when `app.isPackaged` (`main.js:1665-1675`);
+- In `apply`: `Wait-Process -Timeout 90`, **12 copy rounds × 600ms**, cleanup 400ms after restart (`updater.js:271-306`);
+- Exit the app **900ms** after `apply` returns (`main.js:596`);
+- `downloadMulti`: chunk idle **20s**, slow threshold **45s + 120KB/s**, **6** retries per chunk, at most **2** source switches;
+- `download` (single stream): idle **30s**, non-2xx retries **2** × 1.5s.
 
-### 8.2 这条链上最容易出问题的环节
+### 8.2 The most failure-prone links in this chain
 
-| # | 现象（用户视角） | 代码位置 | 机理 / 备注 |
+| # | Symptom (user's view) | Code location | Mechanism / notes |
 |---|---|---|---|
-| 1 | **「卡在准备运行时」**，进度条长时间停在 1~3% | `provision.js:531`（固定 `percent:1`）+ `sources.js:412-417`（**串行**测速，每地址 ≤9s）+ `sources.js:52`（256KB/次） | 4 个候选（直连+2 镜像+Gitee）就是 30s+ 的「没有任何字节进度」。网络越差候选越多，越像卡死 |
-| 2 | 进度 **停在 99% 很久**，随后又跳回「改用官方源补齐」 | `provision.js:575-576`（`materializeImages(...).catch(()=>0)`）+ `:790`（单镜像失败只 onLog） | `.xz` 展开失败被两层 catch 吞掉 → `checkEnv().sysimg.ok=false` → `autoDeploy` 走 `main.js:330` 再下一套 1.4GB；下次启动还会重试展开 |
-| 3 | `@napi-rs/lzma` 相关的乱错 | `provision.js:771-781`（`require.resolve('@napi-rs/lzma')` 再按文件路径 require `index.js`） | 打包时若 lzma 二进制没被带上/被 asar 压住 → `Cannot find module`；注释解释了为什么不能直接 `require('@napi-rs/lzma')`（ESM polyfill） |
-| 4 | **「设了运行时目录，还是下到 AppData」** | `provision.js:217-224`（`sysImgRoot` 三分支）、`:726`（`materializeImages` 目标）、`:237`（`avdHome`）、`store.js:67-98`（`runtime.dir` 默认空）、`main.js:97-171`（`bootstrapBundledRuntime` **会覆盖** `runtime.dir`） | ① 老用户 `<DATA_DIR>/system-images` 已存在 → 分支 2 继续用它，不会搬；② 便携版 exe 旁带 `runtime/` 时，`bootstrapBundledRuntime` 在 `main.js:165-168` 直接 `saveSettings({runtime:{dir: bundled}})`，用户手设的目录被覆盖（只有 `sameTree && emulator.exe 存在` 才尊重旧设置，`:144-148`）；③ AVD 另有 `avdDir` 设置，可能与运行时目录不同盘 |
-| 5 | 磁盘明明够却报「空间不足」，或反过来解压到一半失败 | `provision.js:262-277`（`need` 表 264-265 无 `'runtime'`）、`main.js:940`（自检阈值 8192MB） | `guardDisk('runtime')` 只估 1536MB，整包 + 展开实际要 ~5GB；guard 通过后仍可能撑爆 |
-| 6 | 进度 **卡在 95% 不动**（历史 issue） | 已有对策：`download.js:446-451,492-503`（低速换源）、`:466-480`（保证 settle）；单流路径仍只有 `idleMs=30s`（`:112`） | 慢源拖尾块；边车（`.chunks.json`）保证重试只补缺块，不会整包重下 |
-| 7 | 「连接被中断 / 停滞」后整个下载作废 | `download.js:155`（`close` 且 `!complete` → reject）、`:526-528`（块耗尽重试 → 抛 + 存边车） | 设计上可续传；但 `downloadParallel` 见半截文件就降级单流（`:188-191`），多线程退化为单线程 |
-| 8 | 更新卡在「正在替换程序并重启」 | `updater.js:315-323`（**不能 detached** 的兼容性注释）、`:271`（Wait-Process 90s）、`:280-285`（复制 12 轮） | 安全软件拦「分离进程」→ 脚本没跑；或卸载/安装被 UAC 挡住；`update/update.log` 是唯一现场 |
-| 9 | 更新完程序目录里多了 1.5GB 的奇怪文件 | `updater.js:80`（便携版兜底 `/\.zip$/i`） | 若某版本只有 `ApkStart-runtime-vX.zip` 而没有 `portable` 资产，会被当成更新包解压进安装目录 |
-| 10 | Gitee 上「有一个版本没有安装包」 | `.github/workflows/release.yml:36-44,78-100`（100MiB 闸门 + `GITEE_TOKEN` 缺失直接失败）；消费端 `sources.js:172-204`、`updater.js:182-227` | 编译期问题，但现象出现在这里；分片必须 `part1..N` 连续，否则整组被丢弃（`sources.js:196-203`） |
-| 11 | 换源/改镜像前缀后仍走老地址 | `main.js:819-825` 只 `sources.reset()`；`provision.js:479,514,642,664,984` 的 `_cache.*` 无失效入口 | 需要重启进程才彻底生效 |
-| 12 | 状态轮询把 CPU/进程拉满 | `provision.js:687-714`（`emulatorVersion` 失败不缓存）、`:298-315`（adb 30s 缓存）、`:845-902`（accel 30s + 落盘 6h/10min） | 未安装 emulator 时每次 `checkEnv` 都 `execFile` 探测多路径 |
-| 13 | AVD 判定「已被占用」而起不来 | `layers.js:87-90`（锁文件清单）、`main.js:963-969`（自检发现 `.lock`）、`engine.js:856`（`killOrphanEmulators`） | 上次异常退出残留 `*.lock`，清理面板能回收 |
-| 14 | 首启把「已装应用/数据」丢掉 | `store.js:179-184`（三处强制迁移）、`engine.js:848`（`materializeImages`）、`doctor.snapshotKey`/`imageIdentity`（快照指纹，`auto-test.js:88,98`） | 迁移是单向的；快照指纹**不含数据分区大小**（`auto-test:1395`），扩容不会清数据 |
+| 1 | **"Stuck preparing runtime"**, the progress bar sits at 1–3% for a long time | `provision.js:531` (pinned `percent:1`) + `sources.js:412-417` (**serial** speed tests, ≤9s per URL) + `sources.js:52` (256KB each) | 4 candidates (direct + 2 mirrors + Gitee) means 30s+ of "no byte progress". The worse the network, the more candidates, the more it looks hung |
+| 2 | Progress **sits at 99% for a long time**, then jumps back to "filling gaps from the official source" | `provision.js:575-576` (`materializeImages(...).catch(()=>0)`) + `:790` (a single image failure only logs) | A `.xz` expansion failure swallowed by two catch layers → `checkEnv().sysimg.ok=false` → `autoDeploy` takes `main.js:330` and downloads another 1.4GB; the next start retries the expansion again |
+| 3 | Weird errors around `@napi-rs/lzma` | `provision.js:771-781` (`require.resolve('@napi-rs/lzma')` then require `index.js` by file path) | If the lzma binary is not packaged / is trapped in the asar → `Cannot find module`; the comment explains why `require('@napi-rs/lzma')` cannot be used directly (ESM polyfill) |
+| 4 | **"I set the runtime directory and it still downloads to AppData"** | `provision.js:217-224` (`sysImgRoot` three branches), `:726` (`materializeImages` target), `:237` (`avdHome`), `store.js:67-98` (`runtime.dir` defaults empty), `main.js:97-171` (`bootstrapBundledRuntime` **overwrites** `runtime.dir`) | (1) An old user already has `<DATA_DIR>/system-images` → branch 2 keeps using it and never moves; (2) when a portable exe has a sibling `runtime/`, `bootstrapBundledRuntime` calls `saveSettings({runtime:{dir: bundled}})` at `main.js:165-168` and overwrites the user's setting (only `sameTree && emulator.exe exists` respects the old setting, `:144-148`); (3) AVDs have a separate `avdDir` setting and may live on a different drive from the runtime |
+| 5 | Plenty of disk yet it reports "not enough space", or extraction fails halfway | `provision.js:262-277` (the `need` table at 264-265 has no `'runtime'`), `main.js:940` (self-check threshold 8192MB) | `guardDisk('runtime')` only estimates 1536MB while the bundle + expansion really needs ~5GB; passing the guard can still overflow |
+| 6 | Progress **stuck at 95%** (historical issue) | Countermeasures already present: `download.js:446-451,492-503` (switch source when slow), `:466-480` (must settle); the single-stream path still only has `idleMs=30s` (`:112`) | A slow source dragging its tail chunk; the sidecar (`.chunks.json`) ensures a retry fetches only the missing chunks instead of the whole package |
+| 7 | "Connection interrupted / stalled" voids the whole download | `download.js:155` (`close` with `!complete` → reject), `:526-528` (chunk retries exhausted → throw + save sidecar) | Resume is by design; but `downloadParallel` degrades to a single stream when it sees a partial file (`:188-191`), turning multi-threaded into single-threaded |
+| 8 | The update hangs at "replacing the program and restarting" | `updater.js:315-323` (the "must not be detached" compatibility comment), `:271` (Wait-Process 90s), `:280-285` (12 copy rounds) | Security software blocking "a detached process" → the script never runs; or uninstall/install is stopped by UAC; `update/update.log` is the only on-site evidence |
+| 9 | After an update the program directory gains a strange 1.5GB file | `updater.js:80` (portable fallback `/\.zip$/i`) | If a release has only `ApkStart-runtime-vX.zip` and no `portable` asset, it is treated as the update package and extracted into the install directory |
+| 10 | "One version on Gitee has no installer" | `.github/workflows/release.yml:36-44,78-100` (100MiB gate + a missing `GITEE_TOKEN` fails outright); consumers `sources.js:172-204`, `updater.js:182-227` | A build-time problem, but the symptom shows up here; parts must be `part1..N` contiguous or the whole group is dropped (`sources.js:196-203`) |
+| 11 | Still using the old address after switching sources / changing the mirror prefix | `main.js:819-825` only calls `sources.reset()`; the `_cache.*` at `provision.js:479,514,642,664,984` have no invalidation entry | A process restart is required for it to take full effect |
+| 12 | Status polling pegs the CPU / spawns processes endlessly | `provision.js:687-714` (a failed `emulatorVersion` is not cached), `:298-315` (adb 30s cache), `:845-902` (accel 30s + on-disk 6h/10min) | When the emulator is not installed, every `checkEnv` `execFile`-probes multiple paths |
+| 13 | The AVD is judged "already in use" and will not boot | `layers.js:87-90` (lock-file inventory), `main.js:963-969` (self-check finds `.lock`), `engine.js:856` (`killOrphanEmulators`) | A `*.lock` left by an abnormal exit; the cleanup panel can reclaim it |
+| 14 | The first launch loses "already installed apps/data" | `store.js:179-184` (three forced migrations), `engine.js:848` (`materializeImages`), `doctor.snapshotKey`/`imageIdentity` (snapshot fingerprint, `auto-test.js:88,98`) | The migration is one-way; the snapshot fingerprint **does not include the data-partition size** (`auto-test:1395`), so resizing does not wipe data |
 
-### 8.3 给接手者的三条「先看这里」
+### 8.3 Three "look here first" notes for the next maintainer
 
-1. **只看一个函数就能解释八成的部署问题**：`Provisioner.checkEnv()`（`provision.js:367`）。它同时决定了 UI 的「差什么」、`autoDeploy` 的分支、`engine.ensure()` 走 emulator 还是 qemu、以及诊断报告的内容。
-2. **路径规则只有一处**：`Provisioner.paths()`（`provision.js:197`）。任何新代码要落运行时文件，必须从这里拿路径，不要自己拼 `DATA_DIR`。
-3. **下载策略都收敛在 `Sources` + `downloadMulti`**：新增源只要进 `candidates()`；新增「限速/选优」逻辑只需要改 `rank()` 与 `downloadMulti` 的混源条件，不要在 `provision.js` 里另写一套。
+1. **One function explains 80% of deployment problems**: `Provisioner.checkEnv()` (`provision.js:367`). It simultaneously determines the UI's "what is missing", the `autoDeploy` branches, whether `engine.ensure()` uses emulator or qemu, and the contents of the diagnostic report.
+2. **Path rules live in exactly one place**: `Provisioner.paths()` (`provision.js:197`). Any new code that writes runtime files must get its paths from there; never assemble `DATA_DIR` yourself.
+3. **Download strategy is centralized in `Sources` + `downloadMulti`**: a new source only needs to enter `candidates()`; new "rate limit / prefer best" logic only needs changes to `rank()` and the multi-source conditions in `downloadMulti` — do not write a second copy inside `provision.js`.

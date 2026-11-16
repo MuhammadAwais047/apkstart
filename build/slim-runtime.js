@@ -26,23 +26,23 @@ const path = require('path');
  *   - lib64/vulkan 删掉只是退回软渲染（已实测能正常引导 + 渲染），但留着也不大 → 删掉省 103MB
  */
 const SAFE = [
-  ['emulator/qemu/windows-x86_64/qemu-system-aarch64.exe', 'arm64 的 QEMU 二进制（只发 x86_64 镜像）'],
+  ['emulator/qemu/windows-x86_64/qemu-system-aarch64.exe', 'arm64 QEMU binary (only x86_64 images are shipped)'],
   // 注意：不能整目录删 emulator/lib64/vulkan —— vulkan-1.dll 是 -gpu host 的加载器，
   // 删了 host 会直接失败、只剩软件渲染（实测 AMD 780M 上必须保留）。只删大件：
-  ['emulator/lib64/vulkan/layers', 'Vulkan 校验层（host 渲染用不到，-20MB）'],
-  ['emulator/lib64/vulkan/glslangValidator.exe', '着色器校验工具（运行时用不到，-7MB）'],
-  ['emulator/lib64/vulkan/libvulkan_lvp.dll', 'lavapipe 软件 Vulkan 后备（有系统显卡驱动时用不到，-53MB）'],
-  ['emulator/lib64/vulkan/lvp_icd.json', 'lavapipe 的 ICD 描述（-1KB）'],
-  ['emulator/lib64/vulkan/vk_swiftshader.dll', 'SwiftShader Vulkan（gles_angle 目录里有同款副本，-23MB）'],
-  ['emulator/lib64/qt/translations', '模拟器界面的多语言包（只剩 38px 标题栏）'],
+  ['emulator/lib64/vulkan/layers', 'Vulkan validation layers (unused with host rendering, -20MB)'],
+  ['emulator/lib64/vulkan/glslangValidator.exe', 'Shader validation tool (not needed at runtime, -7MB)'],
+  ['emulator/lib64/vulkan/libvulkan_lvp.dll', 'lavapipe software Vulkan fallback (unused when a system GPU driver exists, -53MB)'],
+  ['emulator/lib64/vulkan/lvp_icd.json', 'lavapipe ICD descriptor (-1KB)'],
+  ['emulator/lib64/vulkan/vk_swiftshader.dll', 'SwiftShader Vulkan (an identical copy lives in gles_angle, -23MB)'],
+  ['emulator/lib64/qt/translations', 'Emulator UI translations (only a 38px title bar remains)'],
   // 注意：不能删 emulator-check.exe —— emulator -accel-check 靠它检测 AEHD/WHPX，
   // 缺了会判定"无硬件加速"退回 TCG 软件模拟（实测开机从 42s 变成 10 分钟+）。
-  ['emulator/qsn.exe', 'QEMU 快照通知助手（emulator.exe 无任何引用，已 strings 实证，-34MB）'],
-  ['emulator/resources/Toren1BD_Main.png', 'VR 全景环境贴图（红果用不到，-3.7MB）'],
-  ['emulator/resources/Toren1BD_Decor.png', 'VR 全景装饰贴图（-3.5MB）'],
-  ['emulator/resources/Toren1BD.obj', 'VR 全景 3D 模型（-3.5MB）'],
-  ['emulator/resources/macroPreviews', '宏操作预览图（-2.7MB）'],
-  ['emulator/resources/default360.mp4', '360° 全景默认视频（-2.4MB）'],
+  ['emulator/qsn.exe', 'QEMU snapshot notification helper (no references from emulator.exe, verified with strings, -34MB)'],
+  ['emulator/resources/Toren1BD_Main.png', 'VR panorama environment texture (not needed, -3.7MB)'],
+  ['emulator/resources/Toren1BD_Decor.png', 'VR panorama decoration texture (-3.5MB)'],
+  ['emulator/resources/Toren1BD.obj', 'VR panorama 3D model (-3.5MB)'],
+  ['emulator/resources/macroPreviews', 'Macro preview images (-2.7MB)'],
+  ['emulator/resources/default360.mp4', 'Default 360° panorama video (-2.4MB)'],
 ];
 
 /** 激进档目前为空：WebEngine 是硬依赖、gles_angle 是软渲染依赖，都不敢删 */
@@ -60,7 +60,7 @@ function sizeOf(p) {
 
 function slim(root, { aggressive = false, dryRun = false, log = console.log } = {}) {
   if (!fs.existsSync(path.join(root, 'emulator', 'emulator.exe'))) {
-    throw new Error(`${root} 不是一个运行时目录（缺 emulator/emulator.exe）`);
+    throw new Error(`${root} is not a runtime directory (missing emulator/emulator.exe)`);
   }
   const list = aggressive ? SAFE.concat(AGGRESSIVE) : SAFE;
   let freed = 0;
@@ -72,14 +72,14 @@ function slim(root, { aggressive = false, dryRun = false, log = console.log } = 
       try {
         fs.rmSync(p, { recursive: true, force: true });
       } catch (e) {
-        log(`  跳过 ${rel}：${e.message}`);
+        log(`  Skipping ${rel}: ${e.message}`);
         continue;
       }
     }
     freed += n;
-    log(`  删除 ${rel}（${(n / 1048576).toFixed(0)} MB）— ${why}`);
+    log(`  Removed ${rel} (${(n / 1048576).toFixed(0)} MB) — ${why}`);
   }
-  log(`${dryRun ? '可释放' : '已释放'} ${(freed / 1048576).toFixed(0)} MB`);
+  log(`${dryRun ? 'Reclaimable' : 'Freed'} ${(freed / 1048576).toFixed(0)} MB`);
   return freed;
 }
 
@@ -89,6 +89,6 @@ if (require.main === module) {
   const root = path.resolve(process.argv[2] || path.join(__dirname, 'runtime'));
   const aggressive = process.argv.includes('--aggressive');
   const dryRun = process.argv.includes('--dry-run');
-  console.log(`瘦身目标：${root}（${aggressive ? '激进' : '安全'}档）`);
+  console.log(`Slim target: ${root} (${aggressive ? 'aggressive' : 'safe'} mode)`);
   slim(root, { aggressive, dryRun });
 }

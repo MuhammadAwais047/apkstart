@@ -148,12 +148,12 @@ function nextSessionState(active, event, pkg) {
   };
 }
 
-/** 给日志/诊断用的一行摘要 */
+/** One-line summary for logs/diagnostics */
 function describeSession(state, plan) {
   const n = state.active.length;
-  if (!n) return '容器空闲（Android 常驻但已降优先级，0 个应用进程）';
-  return `容器活跃：${n} 个应用窗口${plan && plan.stopped && plan.stopped.length
-    ? `，已停掉 ${plan.stopped.length} 个后台应用` : ''}`;
+  if (!n) return 'Container idle (Android resident but deprioritized, 0 app processes)';
+  return `Container active: ${n} app window${n === 1 ? '' : 's'}${plan && plan.stopped && plan.stopped.length
+    ? `, stopped ${plan.stopped.length} background app${plan.stopped.length === 1 ? '' : 's'}` : ''}`;
 }
 
 module.exports = {

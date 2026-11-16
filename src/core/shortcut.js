@@ -151,7 +151,7 @@ function writeShortcut(opt) {
   try {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   } catch (e) {
-    throw new Error(`快捷方式目录不可写：${dir}（${e.message}）`);
+    throw new Error(`Shortcut folder not writable: ${dir} (${e.message})`);
   }
   if (fs.existsSync(opt.shortcutPath)) {
     try { fs.unlinkSync(opt.shortcutPath); } catch (_) { /* ignore */ }
@@ -165,9 +165,9 @@ function writeShortcut(opt) {
     cwd: opt.cwd || path.dirname(opt.target),
     appUserModelId: opt.appUserModelId,
   });
-  if (!ok) throw new Error('创建快捷方式失败（writeShortcutLink 返回 false）');
+  if (!ok) throw new Error('Failed to create shortcut (writeShortcutLink returned false)');
   if (!fs.existsSync(opt.shortcutPath)) {
-    throw new Error(`快捷方式未落盘：${opt.shortcutPath}`);
+    throw new Error(`Shortcut was not written: ${opt.shortcutPath}`);
   }
   return opt.shortcutPath;
 }

@@ -18,25 +18,25 @@ function copy(src, dest) {
   fs.cpSync(src, dest, { recursive: true });
 }
 
-console.log('打包便携版 →', OUT);
+console.log('Packing portable build →', OUT);
 // 目标已存在时不做整树删除：部分环境会拦截批量删除，且打包中途失败会丢掉
 // 上一个可用版本。改为先把旧目录改名保留，再全新构建；占用中则自动换目录。
 if (fs.existsSync(OUT)) {
   try {
     const backup = `${OUT}.prev-${new Date().toISOString().replace(/[:.]/g, '-')}`;
     fs.renameSync(OUT, backup);
-    console.log('旧版本已保留 →', backup);
+    console.log('Previous build kept →', backup);
   } catch (_) {
     // 某些环境（杀软 / 搜索索引 / 资源管理器）会长时间持有目录句柄，
     // 整目录改名必然 EBUSY；这时退到带版本号的目录，产物一样可用且不再重名。
     OUT = path.join(ROOT, 'dist', `ApkStart-v${require(path.join(ROOT, 'package.json')).version}-win64-portable`);
-    console.log('旧目录被占用，改输出到 →', OUT);
+    console.log('Output directory is busy; writing to →', OUT);
   }
 }
 fs.mkdirSync(path.join(OUT, 'resources', 'app'), { recursive: true });
 
 // 1. Electron 运行时
-console.log('复制 Electron 运行时…');
+console.log('Copying Electron runtime…');
 copy(ELECTRON_DIST, OUT);
 fs.rmSync(path.join(OUT, 'resources', 'default_app.asar'), { force: true });
 
@@ -74,7 +74,7 @@ for (const rel of ['d3dcompiler_47.dll']) {
 }
 
 // 2. 应用本体
-console.log('复制应用…');
+console.log('Copying app…');
 const appDir = path.join(OUT, 'resources', 'app');
 for (const item of ['package.json', 'src', 'LICENSE']) {
   const src = path.join(ROOT, item);
@@ -102,7 +102,7 @@ fs.renameSync(path.join(OUT, 'electron.exe'), path.join(OUT, 'ApkStart.exe'));
 
 // 5. 版本信息
 const pkg = require(path.join(ROOT, 'package.json'));
-fs.writeFileSync(path.join(OUT, 'VERSION.txt'), `ApkStart ${pkg.version}\n构建时间：${new Date().toLocaleString('zh-CN')}\n`);
+fs.writeFileSync(path.join(OUT, 'VERSION.txt'), `ApkStart ${pkg.version}\nBuild time: ${new Date().toLocaleString('en-US')}\n`);
 
 // 6. 体积报告：每次打包都打印，避免以后又悄悄变胖
 function dirSize(dir) {
@@ -117,8 +117,8 @@ function dirSize(dir) {
 }
 const totalMB = dirSize(OUT) / 1048576;
 console.log(
-  `完成。整包 ${totalMB.toFixed(0)} MB（语言包省了 ${(localeSaved / 1048576).toFixed(0)} MB，`
-  + `冗余运行库省了 ${(pruneSaved / 1048576).toFixed(1)} MB）。`,
+  `Done. ${totalMB.toFixed(0)} MB total (locales saved ${(localeSaved / 1048576).toFixed(0)} MB, `
+  + `redundant runtime libraries saved ${(pruneSaved / 1048576).toFixed(1)} MB).`,
 );
-console.log('压缩：node build/zip.js dist/ApkStart-win64-portable <输出.zip>');
-console.log(`运行 ${path.join(OUT, 'ApkStart.exe')} 即可使用。`);
+console.log('Compress: node build/zip.js dist/ApkStart-win64-portable <output.zip>');
+console.log(`Run ${path.join(OUT, 'ApkStart.exe')} to start.`);

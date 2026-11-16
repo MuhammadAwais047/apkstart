@@ -1,76 +1,76 @@
 ---
-title: 自己写了个 Windows 安卓启动器：双击 .apk 就能用，还把字节系应用跑通了
+title: I wrote my own Windows Android launcher: double-click an .apk and it just works, plus ByteDance apps now run
 cover: ./assets/wechat-cover.jpg
-description: ApkStart v0.2.2 发布：开源免费的 Windows 安卓应用启动器，全新「完整版」内置引擎与 Android 14 兼容镜像，解压双击即用，零下载零设置。
+description: ApkStart v0.2.2 is out: a free, open-source Android app launcher for Windows, with a new "full" edition that bundles the engine and an Android 14 compatibility image — unzip, double-click, done, zero downloads and zero setup.
 author: RoutineMiku
 source_url: https://github.com/RoutineMiku/apkstart/releases/tag/v0.2.2
 sourceUrl: https://github.com/RoutineMiku/apkstart/releases/tag/v0.2.2
-digest: 开源免费的 Windows 安卓应用启动器，v0.2.2 完整版内置引擎与 Android 14 兼容镜像，解压双击即用。
+digest: A free, open-source Android app launcher for Windows; the v0.2.2 full edition bundles the engine and an Android 14 compatibility image — unzip, double-click, done.
 need_open_comment: 1
 only_fans_can_comment: 0
 ---
 
-# 双击 .apk，就在电脑上跑安卓应用
+# Double-click an .apk, run an Android app on your PC
 
-想在 Windows 上开一个安卓 App，通常要经历：下载几个 GB 的模拟器 → 装环境 → 找 APK → 拖进模拟器 → 忍受弹窗和风扇狂转。装完还可能来一句 `INSTALL_FAILED_NO_MATCHING_ABIS`——这个包只有 ARM 原生库，装不上。
+Opening an Android app on Windows usually means: downloading a multi-gigabyte emulator → setting up the environment → finding the APK → dragging it in → putting up with popups and fans at full blast. And after all that you may still get `INSTALL_FAILED_NO_MATCHING_ABIS` — the package only ships ARM native libraries and will not install.
 
-所以我自己写了一个：**ApkStart**。
+So I wrote my own: **ApkStart**.
 
-它是一个极致轻量的 Windows 安卓应用启动器：把 `.apk` 关联给它，**双击即装**，自动生成桌面快捷方式，每个应用一个独立窗口，电脑和安卓之间还有共享文件夹可以双向拖文件。
+It is an ultra-light Android app launcher for Windows: associate `.apk` files with it, **double-click to install**, with a desktop shortcut created automatically, one independent window per app, and a shared folder between the PC and Android for dragging files in both directions.
 
-![ApkStart 主界面](./assets/app.png)
+![ApkStart main window](./assets/app.png)
 
-## 四个特性，装完就用
+## Four features, usable right after install
 
-**① 双击安装。** 关联 `.apk` 后双击就装，自动读取应用名与图标，桌面快捷方式一步到位，不用开任何模拟器控制台。
+**① Double-click to install.** After associating `.apk`, a double-click installs it; the app name and icon are read automatically and the desktop shortcut is created in one step — no emulator console to open.
 
-**② 独立窗口。** 每个 App 跑在自己的自由缩放窗口里（`am start --windowingMode 5`），互不打扰，跟原生 Windows 程序一样排布。
+**② Independent windows.** Each app runs in its own freely resizable window (`am start --windowingMode 5`), out of the way of the others, laid out like native Windows programs.
 
-**③ 文件互通。** `%USERPROFILE%\ApkStartShared` 与安卓内部共享目录打通，电脑里的文件拖进去，App 里直接能打开。
+**③ File interchange.** `%USERPROFILE%\ApkStartShared` is wired to the shared directory inside Android; drag a file in from the PC and the app can open it directly.
 
-**④ 官方引擎 + 硬件加速。** 底层是 Google 官方 Android Emulator 与 AEHD 驱动，官方源 8 线程并行下载，运行时组件由程序自己校验和管理，壳层零第三方依赖。
+**④ Official engine + hardware acceleration.** The base is Google's official Android Emulator and the AEHD driver; official sources are downloaded with 8 parallel threads, runtime components are verified and managed by the app itself, and the shell has zero third-party dependencies.
 
-## v0.2.2：这次把「麻烦」彻底拿掉了
+## v0.2.2: this time the "hassle" is gone for good
 
-新版做了两件事。
+The new version does two things.
 
-**一是完整版开箱即用。** 以前首次启动要点一下「一键部署」下载引擎和镜像（约 2 分钟）。现在完整版直接把这些全打包进安装包里：运行时引擎、platform-tools、AEHD 驱动，以及带 ARM 翻译层的 Android 14 兼容镜像。解压双击 `ApkStart.exe`，四项检测全绿，直接进主界面——**零下载、零设置**。
+**First, the full edition works out of the box.** Previously the first launch needed a click on "one-click deploy" to download the engine and image (about 2 minutes). Now the full edition packs all of it into the installer: the runtime engine, platform-tools, the AEHD driver, and an Android 14 compatibility image with the ARM translation layer. Unzip and double-click `ApkStart.exe`, all four checks come back green, and you are on the main screen — **zero downloads, zero setup**.
 
-**二是把字节系应用跑通了。** 之前红果短剧这类只有 arm64-v8a 的包，在旧版 API 30 镜像上点完隐私协议就会崩（`libndk_translation` 的 `DoBadTrampoline`）。换成 Android 14 镜像后，新版翻译层解决了这个问题：实测安装成功、进入推荐流、视频正常播放、滑动切视频不崩。
+**Second, ByteDance apps now run.** Previously packages like Hongguo Short Dramas that only ship arm64-v8a crashed right after the privacy dialog on the old API 30 image (in `libndk_translation`, at `DoBadTrampoline`). With the Android 14 image the new translation layer fixes it: tested end to end, the install succeeds, the recommendation feed loads, video plays normally, and swiping between videos does not crash.
 
-![红果短剧在 ApkStart 里播放](./assets/compat-hongguo-playing.png)
+![Hongguo Short Dramas playing inside ApkStart](./assets/compat-hongguo-playing.png)
 
-设置里一键开启「ARM 兼容模式」即可，普通 ARM-only 应用同样获益。个别应用若有更深的反模拟检测（校验真实传感器 / 基带）仍可能受限，这点如实说明。
+Just turn on "ARM compatibility mode" in the settings; ordinary ARM-only apps benefit as well. A few apps with deeper anti-emulator checks (verifying real sensors / baseband) may still be limited — that is stated honestly here.
 
-![设置面板与关于区](./assets/brand.png)
+![Settings panel and About section](./assets/brand.png)
 
-## 下载：两个版本，任选
+## Download: two editions, take your pick
 
-> 微信公众号正文不支持附加安装包文件，所以这里放的是**直达安装包的二维码**：长按识别即可下载；也可以拉到文末点 **「阅读原文」** 进入 GitHub Release 页面。
+> WeChat article bodies do not allow installer attachments, so what is here is a **QR code that links straight to the installer**: long-press to scan and download; or scroll to the end and tap **"Read original"** to reach the GitHub Release page.
 
-![扫码下载 ApkStart v0.2.2](./assets/download-qr.png)
+![Scan to download ApkStart v0.2.2](./assets/download-qr.png)
 
-| 版本 | 体积 | 适合谁 |
+| Edition | Size | Who it is for |
 | --- | --- | --- |
-| 轻量版 `win64-portable.zip` | 0.11 GB | 首次启动点「一键部署」，自动装好引擎与镜像，约 2 分钟 |
-| **完整版 `win64-full.7z.001`（推荐）** | 1.35 GB | 内置全部组件与 ARM 兼容镜像，解压双击即用，零下载零设置 |
+| Lightweight `win64-portable.zip` | 0.11 GB | Click "one-click deploy" on first launch; the engine and image are installed automatically in about 2 minutes |
+| **Full `win64-full.7z.001` (recommended)** | 1.35 GB | Bundles all components and the ARM compatibility image: unzip, double-click, done, zero downloads and zero setup |
 
-完整版是 7z 分卷，用 7-Zip / WinRAR / Bandizip 解压 `.001` 即可；当前版本只有单个分卷。两个版本都是绿色便携，不用管理员安装。
+The full edition is a 7z volume: extract `.001` with 7-Zip / WinRAR / Bandizip; the current version has a single volume. Both editions are portable and need no administrator install.
 
-项目完全开源，地址：<https://github.com/RoutineMiku/apkstart>。欢迎 Star、Issue 和 PR；之后发新版只需打 tag，GitHub Actions 会自动构建并发布这两个包。
+The project is fully open source: <https://github.com/RoutineMiku/apkstart>. Stars, issues and PRs are welcome; releasing a new version only needs a tag, and GitHub Actions builds and publishes both packages automatically.
 
-## 关于作者
+## About the author
 
-**ApkStart 由 RoutineMiku 开发维护**，Powered by RoutineMiku。
+**ApkStart is developed and maintained by RoutineMiku**, powered by RoutineMiku.
 
-微信公众号与抖音的二维码都放在下面，也放进软件的「设置 → 关于」里了，遇到问题欢迎来找我。
+The WeChat account and Douyin QR codes are below, and they are also in the app under "Settings → About"; come find me if you run into problems.
 
-![微信公众号二维码](./assets/wechat-qr.jpg)
+![WeChat account QR code](./assets/wechat-qr.jpg)
 
-![抖音二维码](./assets/douyin-qr.jpg)
+![Douyin QR code](./assets/douyin-qr.jpg)
 
-抖音号 **RoutineMiku（日常MIKU）**，主页链接：<https://v.douyin.com/9TIIxVCANig/>
+Douyin handle **RoutineMiku (日常MIKU)**, profile link: <https://v.douyin.com/9TIIxVCANig/>
 
 ---
 
-*项目采用 MIT 许可。轻量版的运行时组件由用户本机从 Google 官方源按需下载；完整版为便利性一并打包，相关组件遵循其各自许可协议。*
+*The project uses the MIT license. The lightweight edition's runtime components are downloaded on demand from Google's official sources on the user's machine; the full edition bundles them for convenience, and those components remain under their own licenses.*

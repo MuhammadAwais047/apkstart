@@ -1,53 +1,53 @@
 # ApkStart v0.3.9
 
-> 一句话：把**横竖屏切换**从「转画面」改成真正的**手机 / 平板排版切换**，修好了全屏不横屏、点击失效、以及点标题栏按钮时冒黑边的问题；另外加了**存储回收**。
+> In one line: changed **landscape/portrait switching** from "rotating the picture" to a real **phone / tablet layout switch**, fixed full screen not going landscape, taps not registering, and a black strip appearing when clicking title-bar buttons; also added **storage reclamation**.
 
-## 一、横竖屏 / 全屏：改成真正的排版切换
+## 1. Landscape/portrait and full screen: a real layout switch
 
-**原来的问题**：点旋转（或全屏）后，画面整个顺时针/逆时针躺倒，应用并没有重新排版，也摆不正；全屏也不会自动横屏。
+**The old problem**: after tapping rotate (or full screen) the picture lay on its side, clockwise or counter-clockwise, while the app did not re-layout and could not be set upright; and full screen did not go landscape automatically.
 
-**根因**：旧的实现是「改一下 `wm size`，再让窗口代理给模拟器发 Ctrl+←」。Ctrl+← 只是把**模拟器的画面**转 90°，安卓侧排版完全没变 —— 所以看到的就是「画面躺倒」。而且 AVD 生成配置里写死了 `hw.sensors.orientation=no`，安卓根本不允许旋转，只能靠转画面糊弄。
+**Root cause**: the old implementation was "change `wm size`, then have the window agent send Ctrl+← to the emulator". Ctrl+← only rotates **the emulator's picture** 90°, with the Android-side layout completely unchanged — hence "the picture lying down". On top of that, the AVD template hard-coded `hw.sensors.orientation=no`, so Android did not allow rotation at all and only picture rotation could fake it.
 
-**现在的做法**：
+**What it does now**:
 
-- 只改**逻辑显示尺寸**（`wm size`），让安卓按新宽度重新排版：
-  - 竖屏 720×1280 @320dpi ≈ **360dp 宽 → 手机排版**；
-  - 横屏 1280×720 @320dpi ≈ **640dp 宽 → 平板/分栏排版**（Android 以 600dp 为平板门槛）；
-- 同时 `wm user-rotation lock 0`，保证画面永远是正的，不再出现「躺倒」；
-- **删掉了转画面那一步**，画面与排版始终一致；
-- 窗口会按新分辨率重算宽高比并重新贴合，不留黑边；
-- **全屏按钮现在会自动切横屏（平板排版）**，退出全屏自动回到竖屏手机排版；设置里的「显示模式」切换同样生效；
-- AVD 配置改为 `hw.sensors.orientation=yes` + `hw.sensors.accelerometer=yes`，后续新机器不会再被锁死竖向。
+- Only the **logical display size** (`wm size`) is changed, so Android re-lays out for the new width:
+  - Portrait 720×1280 @320dpi ≈ **360dp wide → phone layout**;
+  - Landscape 1280×720 @320dpi ≈ **640dp wide → tablet / two-pane layout** (Android's tablet threshold is 600dp);
+- At the same time `wm user-rotation lock 0` keeps the picture upright always, so nothing ever lies on its side;
+- **The picture-rotation step is gone**, so the picture and the layout always agree;
+- The window recomputes its aspect ratio for the new resolution and re-fits, leaving no black bars;
+- **The full-screen button now switches to landscape (tablet layout) automatically**, and exiting full screen returns to portrait phone layout; the "display mode" switch in Settings behaves the same;
+- The AVD config is now `hw.sensors.orientation=yes` + `hw.sensors.accelerometer=yes`, so future machines are no longer locked to portrait.
 
-## 二、修复：点标题栏四个按钮时冒出黑边
+## 2. Fix: black strip appearing when clicking the four title-bar buttons
 
-模拟器的 Qt 窗口比真实 LCD 大一圈（四周各 8px 灰边）。为了让灰边不出现在画面里，原来的做法是把子窗口整体向上/向左溢出 8px —— 这 8px 正好压在标题栏底部；而按钮点击时窗口代理会把模拟器窗口抬到最前，于是那条溢出的部分就在标题栏下方画出一条**黑边**。
+The emulator's Qt window is one ring larger than the real LCD (8 px gray border on each side). To keep the gray border out of the picture, the old approach overflowed the child window by 8 px up/left — and those 8 px sat exactly under the title bar; when a button was clicked the window agent raised the emulator window, so the overflow drew a **black strip** below the title bar.
 
-**修复**：给嵌入的模拟器窗口加了**窗口区域裁剪**（`SetWindowRgn`），把溢出到标题栏的那 8px 直接裁掉。这样无论怎么抬升，它都画不到标题栏上。
+**Fix**: the embedded emulator window now has **window region clipping** (`SetWindowRgn`), cutting away the 8 px that overflow into the title bar. However it is raised, it can no longer draw over the title bar.
 
-## 三、修复：点击失效 / 点不到「同意并继续」
+## 3. Fix: taps not registering / could not hit "Agree and continue"
 
-这一条和上面两个问题同源：画面被转 90° 之后，窗口代理的坐标映射仍是「竖屏」的，点击位置整体偏移，看起来就是「点了没反应」。排版切换改对之后点击恢复正常。
+This shares a root cause with the two problems above: once the picture was rotated 90°, the window agent's coordinate mapping was still "portrait", so tap positions were shifted overall and it looked like "nothing happens when I tap". With the layout switch corrected, tapping works normally again.
 
-顺带把「等待联网」的成本压了下来：冷启动重试改成**每个进程只做一次**，首次等待从 60s 降到 25s —— 之前一次点开可能要多等好几分钟，现在正常情况几秒内就过。
+While at it, the cost of "waiting for the network" was reduced: the cold-boot retry now happens **at most once per process**, and the initial wait dropped from 60 s to 25 s — previously opening an app could mean several extra minutes, now it is a few seconds in the normal case.
 
-## 四、存储占用优化
+## 4. Storage footprint optimisation
 
-「清理旧版本残留」现在会额外回收**废弃的快速启动快照**：
+"Clean up old-version leftovers" now also reclaims **abandoned quick-boot snapshots**:
 
-- 旧版遗留的 `default_boot`（一份 ram.img 约 **3 GB**）；
-- 删不掉就改名的 `*.stale-*` 残留；
-- 当前正在用的快照（`apkstart`）永远不动。
+- The `default_boot` left over from older versions (one ram.img of about **3 GB**);
+- `*.stale-*` leftovers that could not be deleted and were renamed;
+- The snapshot in use (`apkstart`) is never touched.
 
-实测开发机上可回收项合计约 **4.65 GB**（6 个旧版本程序目录 + 1 份废弃快照）。
+Measured on the development machine, reclaimable items totalled about **4.65 GB** (6 old version program directories + 1 abandoned snapshot).
 
-## 五、实测
+## 5. Measured
 
-- `npm test`：**113 项全部通过**（8 + 25 + 80）。
-- `wm size 1280x720` 后 framebuffer 实测变为 **1280×720**，画面正立（截图确认）。
-- 应用窗口嵌入 `embedded=true`；关闭窗口后 `pidof` 为空（上一版的修复继续有效）。
+- `npm test`: **113 items all passed** (8 + 25 + 80).
+- After `wm size 1280x720` the framebuffer measured **1280×720** and the picture was upright (confirmed by screenshot).
+- The app window embedded with `embedded=true`; after closing the window `pidof` is empty (the previous release's fix still works).
 
-## 六、升级方式
+## 6. How to upgrade
 
-- 便携版：解压覆盖，数据目录（默认 `%APPDATA%\apkstart`）保持不变。
-- 安装版：直接安装覆盖。
+- Portable: unzip over the old copy; the data directory (default `%APPDATA%\apkstart`) is untouched.
+- Installed edition: install over the old copy.

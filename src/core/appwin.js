@@ -92,7 +92,7 @@ class AppWindow {
 
     this.pkg = pkg;
     this.portrait = portrait || { w: 540, h: 960 };
-    this.state = { label: label || '应用', tip: '正在启动安卓运行时…', ready: false, landscape: false };
+    this.state = { label: label || 'App', tip: 'Starting the Android runtime…', ready: false, landscape: false };
 
     const area = this._area();
     const size = AppWindow.sizeFor(area, this.portrait, false);
@@ -314,7 +314,7 @@ class AppWindow {
   async rotate(onRestart) {
     if (!this.isOpen) return this.state.landscape;
     const next = !this.state.landscape;
-    this.setState({ tip: next ? '正在切换到横屏（重启安卓运行时，约 30-60 秒）…' : '正在切回竖屏（重启安卓运行时，约 30-60 秒）…', ready: false });
+    this.setState({ tip: next ? 'Switching to landscape (restarting the Android runtime, about 30-60 s)…' : 'Switching back to portrait (restarting the Android runtime, about 30-60 s)…', ready: false });
     if (typeof onRestart === 'function') {
       const ok = await onRestart(next).catch(() => false);
       if (ok) {

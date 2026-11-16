@@ -83,7 +83,7 @@ async function xzFile(src, dest) {
       p.on('error', () => resolve(-1));
     });
     const watchdog = setTimeout(() => {
-      console.log(`  （xz 压缩超过 ${Math.round(timeoutMs / 60000)} 分钟，终止并改用 gzip -9）`);
+      console.log(`  (xz compression exceeded ${Math.round(timeoutMs / 60000)} minutes; aborting and switching to gzip -9)`);
       try { p.kill(); } catch (_) { /* 已退出 */ }
     }, timeoutMs);
 
@@ -108,9 +108,9 @@ async function xzFile(src, dest) {
     if (ok) return;
     // 半个 .xz 留着会污染产物，必须删掉再走兜底。
     try { fs.rmSync(dest, { force: true }); } catch (_) { /* ignore */ }
-    console.log(`  （${py} 压缩失败，改用 gzip -9）`);
+    console.log(`  (${py} compression failed; switching to gzip -9)`);
   } else {
-    console.log('  （未找到 python，改用 gzip -9（体积略大但可靠））');
+    console.log('  (python not found; switching to gzip -9 (slightly larger but reliable))');
   }
   // 兜底：gzip -9（不是 xz，运行时 materializeImages 按扩展名选择解压器）
   await pipeline(
@@ -123,11 +123,11 @@ async function xzFile(src, dest) {
 async function main() {
   const force = process.argv.includes('--force');
   if (fs.existsSync(MARK) && !force) {
-    console.log('build/runtime 已是最新（加 --force 重建）');
+    console.log('build/runtime is up to date (use --force to rebuild)');
     return;
   }
   if (!fs.existsSync(SRC)) {
-    console.error('缺少 engine/ 目录，无法准备运行时');
+    console.error('engine/ directory is missing; cannot prepare the runtime');
     process.exit(1);
   }
   fs.mkdirSync(OUT, { recursive: true });
@@ -136,13 +136,13 @@ async function main() {
   for (const dir of ['emulator', 'platform-tools']) {
     const s = path.join(SRC, dir);
     if (!fs.existsSync(s)) continue;
-    console.log(`复制 ${dir}…`);
+    console.log(`Copying ${dir}…`);
     fs.cpSync(s, path.join(OUT, dir), { recursive: true });
   }
 
   // 1.5 瘦身：删掉固定启动参数下永远不会被加载的文件（约 -400MB）
   if (!process.argv.includes('--no-slim')) {
-    console.log('瘦身运行时…');
+    console.log('Slimming the runtime…');
     const { slim } = require('./slim-runtime');
     slim(OUT, { aggressive: !process.argv.includes('--safe-slim') });
   }
@@ -168,7 +168,7 @@ async function main() {
             // 模板只在构建期生成一次（mke2fs），之后随代码走，CI 不需要额外工具链。
             if (/^userdata\.img$/i.test(f) && fs.existsSync(SEED_USERDATA)) {
               fs.copyFileSync(SEED_USERDATA, path.join(to, 'userdata.img.gz'));
-              console.log('userdata.img 使用预置 ext4 模板（build/seed）');
+              console.log('userdata.img uses the bundled ext4 template (build/seed)');
               compressed += 1;
               continue;
             }
@@ -181,11 +181,11 @@ async function main() {
               // 用固定大阈值或「压缩比」判定都会把这些合法产物误判成无效而重压。
               const existing = [xz, gz].find((p) => sizeOf(p) > 1024 * 1024);
               if (existing) {
-                console.log(`跳过 ${f}（已有 ${path.extname(existing)} ${(sizeOf(existing) / 1048576).toFixed(1)} MB）`);
+                console.log(`Skipping ${f} (already have ${path.extname(existing)} ${(sizeOf(existing) / 1048576).toFixed(1)} MB)`);
                 compressed += 1;
                 continue;
               }
-              console.log(`压缩 ${f}（${(sizeOf(src) / 1073741824).toFixed(2)} GB）→ XZ 9e（较慢，一次性）…`);
+              console.log(`Compressing ${f} (${(sizeOf(src) / 1073741824).toFixed(2)} GB) → XZ 9e (slow, one-time)…`);
               // eslint-disable-next-line no-await-in-loop
               await xzFile(src, xz);
               compressed += 1;
@@ -208,7 +208,7 @@ async function main() {
     }
   };
   walk(OUT);
-  console.log(`完成：build/runtime（${(total / 1073741824).toFixed(2)} GB，压缩了 ${gzCount} 个大镜像）`);
+  console.log(`Done: build/runtime (${(total / 1073741824).toFixed(2)} GB, ${gzCount} large images compressed)`);
 }
 
 if (require.main === module) {

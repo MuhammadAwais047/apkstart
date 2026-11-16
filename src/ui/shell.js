@@ -29,7 +29,7 @@ window.addEventListener('keydown', (e) => {
 
 function applyState(s) {
   if (!s) return;
-  $('appName').textContent = s.label || '应用';
+  $('appName').textContent = s.label || 'App';
   $('bootName').textContent = s.label || '';
   const icon = s.iconUrl || '';
   if (icon) {

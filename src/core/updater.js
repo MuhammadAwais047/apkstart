@@ -125,7 +125,7 @@ class Updater {
    */
   async prepare(info) {
     const it = info || this.latest;
-    if (!it || !it.asset) throw new Error('这个版本没有可自动安装的安装包，请到 GitHub 发布页手动下载');
+    if (!it || !it.asset) throw new Error('This version has no auto-installable package. Download it manually from the GitHub releases page.');
     const dir = path.join(this.updateDir, it.version);
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, it.asset.name);
@@ -138,7 +138,7 @@ class Updater {
     if (it.asset.parts && it.asset.parts.length) {
       await this._downloadParts(it.asset, file, conns, total);
     } else {
-      this.onProgress({ stage: 'download', percent: 1, message: `正在下载 ${it.asset.name}…` });
+      this.onProgress({ stage: 'download', percent: 1, message: `Downloading ${it.asset.name}…` });
       // 候选地址 = 源站 + 镜像前缀；先各下 256KB 实测速度，再拿最快的那个分块下载。
       // 这是「GitHub 直连几十 KB/s、镜像能跑几 MB/s」时唯一靠谱的选路方式：
       // 按域名猜没用，同一天不同时段差别很大。
@@ -161,7 +161,7 @@ class Updater {
           this.onProgress({
             stage: 'download',
             percent: Math.max(1, Math.min(99, pct)),
-            message: `下载中 ${mb}${sp}`,
+            message: `Downloading ${mb}${sp}`,
             speed: pr.speed,
           });
         },
@@ -173,10 +173,10 @@ class Updater {
       fs.rmSync(out, { recursive: true, force: true });
       fs.mkdirSync(out, { recursive: true });
       await this._extract(file, out);
-      this.onProgress({ stage: 'ready', percent: 100, message: '更新包已解压完成' });
+      this.onProgress({ stage: 'ready', percent: 100, message: 'Update package extracted' });
       return { mode: 'zip', payload: out, version: it.version };
     }
-    this.onProgress({ stage: 'ready', percent: 100, message: '安装包已下载完成' });
+    this.onProgress({ stage: 'ready', percent: 100, message: 'Installer downloaded' });
     return { mode: 'setup', payload: file, version: it.version };
   }
 
@@ -209,15 +209,15 @@ class Updater {
             this.onProgress({
               stage: 'download',
               percent: Math.max(1, Math.min(99, pct)),
-              message: `下载中 ${(got / 1048576).toFixed(1)} MB${total ? ` / ${(total / 1048576).toFixed(1)} MB` : ''}`
-                + `（第 ${part.index}/${asset.parts.length} 片）${sp}`,
+              message: `Downloading ${(got / 1048576).toFixed(1)} MB${total ? ` / ${(total / 1048576).toFixed(1)} MB` : ''}`
+                + ` (part ${part.index}/${asset.parts.length})${sp}`,
               speed: pr.speed,
             });
           },
         });
         const buf = fs.readFileSync(tmp);
         if (part.size && buf.length !== part.size) {
-          throw new Error(`分片 ${part.index} 大小不对（${buf.length} ≠ ${part.size}），已中止，可重试`);
+          throw new Error(`Chunk ${part.index} has the wrong size (${buf.length} ≠ ${part.size}); aborted, you can retry`);
         }
         fs.writeSync(fd, buf, 0, buf.length, doneBytes);
         doneBytes += buf.length;
@@ -227,7 +227,7 @@ class Updater {
       fs.closeSync(fd);
     }
     if (total && doneBytes !== total) {
-      throw new Error(`更新包拼装后大小不对（${doneBytes} ≠ ${total}），已中止，可重试`);
+      throw new Error(`Assembled update size mismatch (${doneBytes} ≠ ${total}); aborted, you can retry`);
     }
   }
 
@@ -246,7 +246,7 @@ class Updater {
           this.onProgress({
             stage: 'extract',
             percent: Math.min(99, Math.round((i / names.length) * 100)),
-            message: `正在解压 ${i}/${names.length}`,
+            message: `Extracting ${i}/${names.length}`,
           });
         }
       }

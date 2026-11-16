@@ -1,62 +1,62 @@
 # ApkStart v0.3.8
 
-> 一句话：加了一张**好看的启动欢迎卡**（开机自启时提醒你一切就绪），修好了**部分用户检查不到更新**，新增**清理旧版本残留**，并把界面整体美化了一轮。
+> In one line: added a **good-looking welcome card at startup** (reminding you everything is ready when launching at boot), fixed **some users being unable to check for updates**, added **cleanup of leftovers from old versions**, and gave the whole UI a polish pass.
 
-## 一、新增：启动欢迎卡
+## 1. New: welcome card at startup
 
-开机自启或打开 ApkStart 时，弹一张轻量的欢迎卡：
+When ApkStart starts automatically at boot or is opened manually, a lightweight welcome card appears:
 
-- 顶部是品牌渐变头图 + 动态问候（早上好 / 下午好 / 夜深了…）；
-- 三个指标一目了然：**已装应用 / 安卓运行时状态 / 设备端口**；
-- 有两条当下最有用的提示（没装应用时教怎么装；装了应用时教窗口操作）；
-- 发现新版本时，会在这里直接提示，不再另外弹右下角气泡；
-- 底部可以勾 **「下次启动不再自动弹出」**，也可以直接「打开设置」。
+- A brand gradient header image plus a dynamic greeting (Good morning / Good afternoon / Up late…);
+- Three metrics at a glance: **installed apps / Android runtime status / device port**;
+- Two of the most useful tips right then (how to install when no apps are installed; how to use windows when apps are installed);
+- When a new version is found, it is announced right here instead of a separate bubble in the corner;
+- At the bottom you can tick **"Do not show automatically on next launch"**, or click "Open settings" directly.
 
-弹出规则：开机自启必弹；手动打开则每天最多一次；勾选后永久不弹。
+Display rules: always shown on auto-start at boot; at most once per day when opened manually; never again once the box is ticked.
 
-## 二、修复：部分用户检查不到更新
+## 2. Fix: some users could not check for updates
 
-**原因**：版本信息依赖两家的 API。GitHub 匿名 API 每 IP 每小时只有 60 次；Gitee 的匿名 API 更紧，实测连续几次就返回 `403 Rate Limit Exceeded`。公司网 / 校园网 / 运营商 NAT 出口下用户很容易两个源都被限流，界面就只会显示「检查更新失败」。
+**Cause**: version info depends on both providers' APIs. GitHub's anonymous API allows only 60 calls per IP per hour; Gitee's anonymous API is tighter still — a few consecutive calls and it returns `403 Rate Limit Exceeded`. Behind corporate networks / campus networks / carrier NAT, users easily get rate-limited on both sources, and the UI only said "update check failed".
 
-**修复**：
+**Fix**:
 
-- 新增**不依赖 API 的兜底**：直接跟随 `releases/latest` 的 302 跳转拿版本号（走 CDN，不消耗 API 额度），再按发布约定拼出下载地址；
-- GitHub 和 Gitee 的 `/releases/download/<tag>/<文件名>` 规范地址都支持拼装（实测 Gitee 会 302 到附件直链，能下到完整字节）；
-- 检查失败时，界面不再是一片空白，而是给一个 **「打开下载页」** 按钮；`app:updateOpen` 现在也放行 `gitee.com`，国内用户不会被挡。
+- A new **API-free fallback**: follow the 302 redirect of `releases/latest` to get the version number (via the CDN, consuming no API quota), then build the download URL by the release convention;
+- Both GitHub's and Gitee's canonical `/releases/download/<tag>/<filename>` URLs can be assembled (measured: Gitee 302s to the attachment's direct link and the full byte count downloads);
+- On a failed check the UI is no longer blank but offers an **"Open download page"** button; `app:updateOpen` now also allows `gitee.com`, so users in mainland China are not blocked.
 
-## 三、新增：清理旧版本残留
+## 3. New: clean up leftovers from old versions
 
-设置 → 系统集成 → **「清理旧版本残留」**：
+Settings → System integration → **"Clean up old-version leftovers"**:
 
-- 扫描**旧版本程序目录**（同目录下的 `ApkStart-vX.Y.Z-win64-portable` 等，且必须真的含 `ApkStart.exe`，绝不碰当前正在运行的版本）；
-- 扫描**已失效的注册表卸载项**（`InstallLocation` 或卸载程序已经不存在的死条目）；
-- 扫描**更新下载留下的临时包**（`%APPDATA%\apkstart\update` 与临时目录里的 `ApkStart-*.zip` 等）；
-- 先列出清单和可释放空间，确认后再删，并如实报告「几项被占用没删掉」。
+- Scans **old version program directories** (`ApkStart-vX.Y.Z-win64-portable` etc. next to it, which must actually contain `ApkStart.exe`; the currently running version is never touched);
+- Scans **dead registry uninstall entries** (entries whose `InstallLocation` or uninstaller no longer exists);
+- Scans **temporary packages left by update downloads** (`%APPDATA%\apkstart\update` and `ApkStart-*.zip` etc. in the temp directory);
+- Lists the items and reclaimable space first, deletes only after confirmation, and honestly reports "N items were in use and could not be deleted".
 
-只做可证明安全的清理，**不动用户数据、不动当前版本**。
+Only provably safe cleanup is done — **no user data, never the current version**.
 
-## 四、隐藏启动时的零碎小弹窗
+## 4. Hide the scattered little popups at startup
 
-- 启动时的「发现新版本」系统通知已取消，统一收进欢迎卡；
-- 之前的启动提示分散在多个 toast / 气泡里，现在只有这一张卡片；
-- 控制台黑窗压制逻辑保持（模拟器 / netsimd / adb 的控制台窗口仍会被隐藏）。
+- The "new version found" system notification at startup is gone, folded into the welcome card;
+- The old startup hints spread across several toasts / bubbles are now just this one card;
+- Console black-window suppression stays (emulator / netsimd / adb console windows are still hidden).
 
-## 五、界面美化
+## 5. UI polish
 
-- 全新配色：翡翠绿品牌色 + 柔和中性底，背景带一层很淡的品牌光晕；
-- 标题栏改为**磨砂玻璃**质感，窗口图标换成矢量品牌标记（小尺寸下也认得出是"播放键"，不再是糊成一团的深色方块）；
-- 应用卡片：更大圆角、悬停上浮 + 品牌色描边、图标带投影；
-- 按钮：主按钮渐变 + 内高光，次级按钮更轻；
-- 模态框、分组标题、滚动条、状态栏统一重做；
-- 欢迎卡是同一套设计语言（渐变头图 + 光晕 + 点阵纹理）。
+- New palette: emerald brand color plus a soft neutral base, with a very light brand glow in the background;
+- The title bar becomes **frosted glass**, and the window icon is a vector brand mark (readable as a "play button" even at small sizes, no longer a blurry dark square);
+- App cards: larger radii, hover lift with a brand-colored outline, icons with a drop shadow;
+- Buttons: primary gradient with an inner highlight, secondary buttons lighter;
+- Modals, section titles, scrollbars and the status bar all redone consistently;
+- The welcome card uses the same design language (gradient header + glow + dot matrix texture).
 
-## 六、实测
+## 6. Measured
 
-- `npm test`：**113 项全部通过**（8 + 25 + 80）。
-- 冒烟截图验证：主界面与欢迎卡均正常渲染（见发布页截图）。
-- 「清理旧版本残留」在开发机上扫出 6 个旧版本目录、约 1.3 GB，当前运行版本被正确排除。
+- `npm test`: **113 items all passed** (8 + 25 + 80).
+- Smoke screenshots: main window and welcome card both render correctly (see the release page screenshots).
+- "Clean up old-version leftovers" found 6 old version directories, about 1.3 GB, on the development machine, and correctly excluded the currently running version.
 
-## 七、升级方式
+## 7. How to upgrade
 
-- 便携版：解压覆盖，数据目录（默认 `%APPDATA%\apkstart`）保持不变。
-- 安装版：直接安装覆盖。
+- Portable: unzip over the old copy; the data directory (default `%APPDATA%\apkstart`) is untouched.
+- Installed edition: install over the old copy.
