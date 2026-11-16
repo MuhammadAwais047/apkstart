@@ -16,6 +16,7 @@ PANEL = (22, 30, 38)
 GREEN = (61, 220, 132)
 WHITE = (240, 246, 242)
 MUTED = (148, 163, 174)
+INK = (9, 22, 15)
 
 
 def font(size, bold=False):
@@ -32,18 +33,24 @@ def grad(w, h, top=(13, 17, 23), bottom=(18, 38, 28)):
 
 
 def wrap(draw, text, f, max_w):
-    lines, cur = [], ''
-    for ch in text:
-        if ch == '\n':
-            lines.append(cur)
-            cur = ''
-            continue
-        if draw.textlength(cur + ch, font=f) > max_w and cur:
-            lines.append(cur)
-            cur = ch
-        else:
-            cur += ch
-    if cur:
+    """Word-aware wrap; a single word wider than max_w is hard-broken by character."""
+    lines = []
+    for para in text.split('\n'):
+        cur = ''
+        for word in para.split(' '):
+            cand = (cur + ' ' + word) if cur else word
+            if draw.textlength(cand, font=f) <= max_w:
+                cur = cand
+                continue
+            if cur:
+                lines.append(cur)
+                cur = ''
+            for ch in word:
+                if draw.textlength(cur + ch, font=f) > max_w and cur:
+                    lines.append(cur)
+                    cur = ch
+                else:
+                    cur += ch
         lines.append(cur)
     return lines
 
@@ -60,6 +67,18 @@ def text_block(draw, xy, text, size, color, max_w, bold=False, spacing=12):
 def rounded(im, box, radius, fill, outline=None, width=1):
     d = ImageDraw.Draw(im)
     d.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
+
+
+def pill(im, xy, text, size, fg, bg, pad_x=24, pad_y=13):
+    """Pill sized to its text, so translated copy cannot overflow a fixed-width chip."""
+    d = ImageDraw.Draw(im)
+    f = font(size, True)
+    x, y = xy
+    w = int(d.textlength(text, font=f)) + 2 * pad_x
+    h = size + 2 * pad_y
+    rounded(im, (x, y, x + w, y + h), h // 2, fill=bg)
+    d.text((x + pad_x, y + pad_y), text, font=f, fill=fg)
+    return x + w
 
 
 def paste_fit(canvas, img, box, radius=0):
@@ -105,10 +124,9 @@ def cover():
     d = ImageDraw.Draw(im)
     paste_fit(im, LOGO, (36, 60, 262, 262), radius=34)
     text_block(d, (330, 78), 'ApkStart', 62, WHITE, 540, bold=True, spacing=0)
-    text_block(d, (334, 158), '双击 .apk 就在 Windows 上跑安卓应用', 26, GREEN, 530, bold=True)
-    text_block(d, (334, 214), '开源 · 免费 · 独立窗口 · 内置 ARM 兼容镜像', 20, MUTED, 530)
-    rounded(im, (334, 274, 650, 322), 24, fill=(61, 220, 132))
-    d.text((356, 282), 'v0.2.2  完整版开箱即用', font=font(22, True), fill=(9, 22, 15))
+    text_block(d, (334, 158), 'Double-click .apk, run Android apps', 26, GREEN, 530, bold=True)
+    text_block(d, (334, 214), 'Open source · free · standalone windows · ARM ready', 20, MUTED, 530)
+    pill(im, (334, 274), 'v0.2.2 · full build, ready to run', 22, INK, GREEN)
     im.save(os.path.join(OUT, 'wechat-cover.jpg'), quality=94)
     return im
 
@@ -119,11 +137,11 @@ def download_qr():
     im = Image.new('RGB', (1080, 700), (247, 250, 248))
     d = ImageDraw.Draw(im)
     rounded(im, (24, 24, 1056, 676), 28, fill=(255, 255, 255), outline=(222, 232, 226), width=2)
-    d.text((60, 52), '扫码下载 ApkStart v0.2.2', font=font(40, True), fill=(13, 17, 23))
-    d.text((62, 110), '微信内长按识别二维码，或点文末「阅读原文」', font=font(24), fill=(100, 118, 108))
+    d.text((60, 52), 'Scan to download ApkStart v0.2.2', font=font(40, True), fill=(13, 17, 23))
+    d.text((62, 110), 'Long-press a code in WeChat, or tap "Read more" at the end', font=font(24), fill=(100, 118, 108))
     cards = [
-        (60, '轻量版 · 0.11 GB', 'ApkStart-v0.2.2-win64-portable.zip', '一键部署，约 2 分钟'),
-        (560, '完整版 · 1.35 GB', 'ApkStart-v0.2.2-win64-full.7z.001', '内置引擎+镜像，解压即用'),
+        (60, 'Lite · 0.11 GB', 'ApkStart-v0.2.2-win64-portable.zip', 'One-click setup, about 2 min'),
+        (560, 'Full · 1.35 GB', 'ApkStart-v0.2.2-win64-full.7z.001', 'Engine + image bundled, unzip and run'),
     ]
     for x, name, asset, tip in cards:
         rounded(im, (x, 170, x + 460, 636), 24, fill=(246, 250, 247), outline=(222, 232, 226), width=2)
@@ -155,81 +173,80 @@ def douyin_base(idx, title, subtitle=None):
 
 
 def dy1():
-    im, d = douyin_base(1, '双击 .apk\n就在电脑上跑安卓 App', '不用装模拟器，不用折腾环境')
+    im, d = douyin_base(1, 'Double-click .apk\nrun Android on your PC', 'No emulator to install, nothing to configure')
     # large logo centered
     paste_fit(im, LOGO, (290, 560, 500, 500), radius=70)
-    rounded(im, (190, 1110, 890, 1190), 40, fill=(61, 220, 132))
-    d.text((250, 1126), '开源 · 免费 · 单文件绿色运行', font=font(38, True), fill=(9, 22, 15))
-    text_block(d, (64, 1250), 'Windows 上最轻的安卓应用启动器', 32, MUTED, 950)
+    pill(im, (190, 1110), 'Open source · free · no install', 38, INK, GREEN)
+    text_block(d, (64, 1250), 'The lightest Android launcher for Windows', 32, MUTED, 950)
     im.save(os.path.join(OUT, 'douyin-1.png'))
     return im
 
 
 def dy2():
-    im, d = douyin_base(2, '以前跑个安卓 App\n有多麻烦？')
+    im, d = douyin_base(2, 'Running an Android app\nused to be painful')
     items = [
-        ('下载慢', '动辄几个 GB 的模拟器，等半天'),
-        ('装不上', 'ARM 应用报 NO_MATCHING_ABIS'),
-        ('太臃肿', '一开模拟器风扇起飞、弹窗广告'),
+        ('Slow download', 'A multi-GB emulator, half an afternoon wasted'),
+        ("Won't install", 'ARM apps fail with NO_MATCHING_ABIS'),
+        ('Bloated', 'Fans take off, pop-up ads everywhere'),
     ]
     y = 540
     for t, sub in items:
         rounded(im, (64, y, 1016, y + 210), 28, fill=PANEL, outline=(48, 66, 58), width=2)
-        d.text((110, y + 34), '✕', font=font(52, True), fill=(240, 96, 96))
+        d.text((110, y + 34), '×', font=font(64, True), fill=(240, 96, 96))
         d.text((190, y + 30), t, font=font(44, True), fill=WHITE)
         d.text((190, y + 108), sub, font=font(30), fill=MUTED)
         y += 240
-    text_block(d, (64, 1300), '所以我自己写了一个：ApkStart', 40, GREEN, 950, bold=True)
+    text_block(d, (64, 1300), 'So I wrote my own: ApkStart', 40, GREEN, 950, bold=True)
     im.save(os.path.join(OUT, 'douyin-2.png'))
     return im
 
 
 def dy3():
-    im, d = douyin_base(3, '四个特性，装完就用')
+    im, d = douyin_base(3, 'Four features, ready to go')
     feats = [
-        ('双击安装', '关联 .apk，双击即装，自动生成桌面快捷方式'),
-        ('独立窗口', '每个 App 一个自由缩放的窗口，互不干扰'),
-        ('文件互通', '电脑与安卓共享文件夹，拖进去就能用'),
-        ('官方引擎', 'Google Android Emulator + AEHD 硬件加速'),
+        ('Double-click install', 'Associate .apk: install on double-click, shortcut added'),
+        ('Standalone window', 'One resizable window per app, fully independent'),
+        ('Shared folder', 'Host and Android share a folder - just drag files in'),
+        ('Official engine', 'Google Android Emulator + AEHD acceleration'),
     ]
     y = 470
     for i, (t, sub) in enumerate(feats):
         rounded(im, (64, y, 1016, y + 160), 26, fill=PANEL)
         rounded(im, (92, y + 34, 172, y + 114), 20, fill=(61, 220, 132))
-        d.text((112, y + 48), f'0{i+1}', font=font(36, True), fill=(9, 22, 15))
+        d.text((112, y + 48), f'0{i+1}', font=font(36, True), fill=INK)
         d.text((210, y + 24), t, font=font(40, True), fill=WHITE)
         d.text((210, y + 90), sub, font=font(27), fill=MUTED)
         y += 180
-    rounded(im, (64, 1200, 1016, 1310), 28, fill=(20, 48, 33), outline=GREEN, width=2)
-    d.text((100, 1228), '设置里一键开启 ARM 兼容模式', font=font(38, True), fill=GREEN)
-    d.text((100, 1286), '仅含 ARM 原生库的应用，也能安装运行', font=font(26), fill=MUTED)
+    rounded(im, (64, 1200, 1016, 1330), 28, fill=(20, 48, 33), outline=GREEN, width=2)
+    d.text((100, 1222), 'Turn on ARM compat mode in settings', font=font(38, True), fill=GREEN)
+    d.text((100, 1280), 'ARM-only apps install and run too', font=font(26), fill=MUTED)
     im.save(os.path.join(OUT, 'douyin-3.png'))
     return im
 
 
 def dy4():
-    im, d = douyin_base(4, 'ARM / 字节系应用\n这次真的能跑', 'Android 14 镜像内置新版翻译层')
+    im, d = douyin_base(4, 'ARM / ByteDance apps\nnow really run', 'Android 14 image with the new translation layer')
     paste_fit(im, HONGGUO, (330, 470, 420, 760), radius=30)
     rounded(im, (64, 1250, 1016, 1360), 28, fill=PANEL)
-    text_block(d, (100, 1266), '实测红果短剧：安装 → 推荐流 → 视频播放，全程不崩', 30, GREEN, 890, bold=True)
+    text_block(d, (100, 1266), 'Hongguo: install, feed, video - no crashes', 30, GREEN, 890, bold=True)
     im.save(os.path.join(OUT, 'douyin-4.png'))
     return im
 
 
 def dy5():
-    im, d = douyin_base(5, '两个版本，任选', '完整版解压即用，零下载零设置')
+    im, d = douyin_base(5, 'Two editions, pick one', 'Full edition: unzip and run, zero downloads')
     rounded(im, (64, 460, 1016, 660), 30, fill=PANEL)
-    text_block(d, (100, 486), '轻量版  0.11 GB', 40, WHITE, 880, bold=True)
-    text_block(d, (100, 548), '首次启动一键部署，约 2 分钟自动装好引擎与镜像', 28, MUTED, 880)
+    text_block(d, (100, 486), 'Lite  0.11 GB', 40, WHITE, 880, bold=True)
+    text_block(d, (100, 548), 'One-click setup on first start: engine and image in ~2 min', 28, MUTED, 880)
     rounded(im, (64, 690, 1016, 910), 30, fill=(20, 48, 33), outline=GREEN, width=2)
-    text_block(d, (100, 716), '完整版  1.35 GB  ★ 推荐', 40, GREEN, 880, bold=True)
-    text_block(d, (100, 778), '内置引擎 + AEHD + Android 14 兼容镜像（翻译层）', 28, WHITE, 880)
-    text_block(d, (100, 826), '解压双击 ApkStart.exe 直接进主界面', 28, MUTED, 880)
+    text_block(d, (100, 716), 'Full  1.35 GB  ★ recommended', 40, GREEN, 880, bold=True)
+    text_block(d, (100, 778), 'Engine + AEHD + Android 14 compat image (translation layer)', 28, WHITE, 880)
+    text_block(d, (100, 826), 'Unzip, run ApkStart.exe, straight to the main screen', 28, MUTED, 880)
     paste_fit(im, qr_png(RELEASE, 400), (64, 950, 400, 400))
-    text_block(d, (510, 990), '扫码下载', 46, WHITE, 500, bold=True)
-    text_block(d, (510, 1060), 'GitHub 搜索\nRoutineMiku/apkstart', 30, MUTED, 500, spacing=6)
-    text_block(d, (510, 1170), '抖音 @日常MIKU', 34, GREEN, 500, bold=True)
-    text_block(d, (510, 1224), '公众号见主页二维码', 28, MUTED, 500)
+    text_block(d, (510, 990), 'Scan to download', 46, WHITE, 500, bold=True)
+    text_block(d, (510, 1060), 'Search GitHub\nRoutineMiku/apkstart', 30, MUTED, 500, spacing=6)
+    text_block(d, (510, 1170), 'Douyin @日常MIKU', 34, GREEN, 500, bold=True)
+    text_block(d, (510, 1224), 'WeChat QR on the profile page', 28, MUTED, 500)
     im.save(os.path.join(OUT, 'douyin-5.png'))
     return im
 
