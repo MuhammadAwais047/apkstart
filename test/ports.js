@@ -1,5 +1,5 @@
 'use strict';
-// 在 Electron 主进程里跑一遍端口发现逻辑，确认 tasklist/netstat 解析是否可用
+// Run the port-discovery logic inside an Electron main process to confirm tasklist/netstat parsing works
 const { app } = require('electron');
 const { execFile } = require('child_process');
 
