@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 一键把 docs/promo/wechat-article.md 推送到微信公众号草稿箱
-# 用法：
-#   1) 设置环境变量 WECHAT_APP_ID / WECHAT_APP_SECRET，或
-#   2) 写入 $HOME/.baoyu-skills/.env（或 WECHAT_ENV_FILE 指定的文件）
-# 前置：公众号后台「基本配置 → IP 白名单」需包含本机公网 IP
+# One command to push docs/promo/wechat-article.md to the WeChat MP draft box
+# Usage:
+#   1) set env vars WECHAT_APP_ID / WECHAT_APP_SECRET, or
+#   2) write them to $HOME/.baoyu-skills/.env (or the file named by WECHAT_ENV_FILE)
+# Prerequisite: the MP console "Basic configuration -> IP whitelist" must include this machine's public IP
 set -e
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
@@ -19,7 +19,7 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 if [ -z "$WECHAT_APP_ID" ] || [ -z "$WECHAT_APP_SECRET" ]; then
-  echo "缺少凭据：请设置 WECHAT_APP_ID / WECHAT_APP_SECRET，或写入 $ENV_FILE" >&2
+  echo "Missing credentials: set WECHAT_APP_ID / WECHAT_APP_SECRET, or write them to $ENV_FILE" >&2
   exit 1
 fi
 
@@ -28,4 +28,4 @@ wenyan publish \
   -f docs/promo/wechat-article.md \
   -t lapis -h solarized-light --no-footnote
 
-echo "已推送到草稿箱：登录 https://mp.weixin.qq.com → 内容管理 → 草稿箱 审核后群发"
+echo "Pushed to the draft box: log in to https://mp.weixin.qq.com -> Content management -> Drafts, review, then publish"

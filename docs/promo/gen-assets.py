@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成 ApkStart 公众号 / 抖音推广配图（Pillow，零第三方服务依赖）"""
+"""Generate ApkStart WeChat / Douyin promo artwork (Pillow, no third-party service deps)"""
 import os
 import qrcode
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -63,7 +63,7 @@ def rounded(im, box, radius, fill, outline=None, width=1):
 
 
 def paste_fit(canvas, img, box, radius=0):
-    """等比缩放居中贴入 box"""
+    """Scale proportionally and center-fit into the box"""
     x, y, w, h = box
     r = min(w / img.width, h / img.height)
     im = img.resize((int(img.width * r), int(img.height * r)), Image.LANCZOS)
@@ -92,11 +92,11 @@ BRAND = Image.open(os.path.join(IMG, 'brand.png')).convert('RGB')
 RELEASE = 'https://github.com/RoutineMiku/apkstart/releases/tag/v0.2.2'
 
 
-# ---------- 微信公众号封面 900x383 ----------
+# ---------- WeChat article cover 900x383 ----------
 def cover():
     im = grad(900, 383, (13, 17, 23), (16, 40, 28))
     d = ImageDraw.Draw(im)
-    # 背景光晕
+    # background halo
     glow = Image.new('RGBA', (900, 383), (0, 0, 0, 0))
     gd = ImageDraw.Draw(glow)
     gd.ellipse((-120, 180, 420, 620), fill=(61, 220, 132, 28))
@@ -113,9 +113,9 @@ def cover():
     return im
 
 
-# ---------- 下载页二维码 ----------
+# ---------- QR codes for the download page ----------
 def download_qr():
-    """公众号正文用：两枚二维码分别直达两个安装包（扫码即下）"""
+    """For the article body: two QR codes, each linking straight to one installer (scan to download)"""
     im = Image.new('RGB', (1080, 700), (247, 250, 248))
     d = ImageDraw.Draw(im)
     rounded(im, (24, 24, 1056, 676), 28, fill=(255, 255, 255), outline=(222, 232, 226), width=2)
@@ -135,18 +135,18 @@ def download_qr():
     return im
 
 
-# ---------- 抖音竖版轮播 1080x1440 ----------
+# ---------- Douyin vertical carousel 1080x1440 ----------
 W, H = 1080, 1440
 
 
 def douyin_base(idx, title, subtitle=None):
     im = grad(W, H, (11, 15, 20), (14, 34, 24))
     d = ImageDraw.Draw(im)
-    # 顶部品牌条
+    # top brand bar
     paste_fit(im, LOGO, (64, 62, 92, 92), radius=20)
     d.text((178, 78), 'ApkStart', font=font(38, True), fill=WHITE)
     d.text((178, 126), 'Powered by RoutineMiku', font=font(22), fill=MUTED)
-    # 页码
+    # page number
     d.text((930, 80), f'{idx}/5', font=font(30, True), fill=GREEN)
     y = text_block(d, (64, 232), title, 62, WHITE, 950, bold=True, spacing=14)
     if subtitle:
@@ -156,7 +156,7 @@ def douyin_base(idx, title, subtitle=None):
 
 def dy1():
     im, d = douyin_base(1, '双击 .apk\n就在电脑上跑安卓 App', '不用装模拟器，不用折腾环境')
-    # 大 Logo 居中
+    # large logo centered
     paste_fit(im, LOGO, (290, 560, 500, 500), radius=70)
     rounded(im, (190, 1110, 890, 1190), 40, fill=(61, 220, 132))
     d.text((250, 1126), '开源 · 免费 · 单文件绿色运行', font=font(38, True), fill=(9, 22, 15))
